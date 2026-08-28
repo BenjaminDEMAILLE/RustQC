@@ -190,6 +190,7 @@ fn run_dna(args: cli::DnaArgs, ui: &Ui) -> Result<()> {
                     runtime_seconds: bam_start.elapsed().as_secs_f64(),
                     counting: None,
                     dupradar: None,
+                    dna: None,
                     outputs: Vec::new(),
                 });
             }
@@ -223,6 +224,15 @@ fn run_dna(args: cli::DnaArgs, ui: &Ui) -> Result<()> {
                 .with_context(|| format!("Failed to write JSON summary: {}", path.display()))?;
         }
     }
+
+    let citations_path = outdir.join("CITATIONS.md");
+    citations::write_dna_citations(
+        &citations_path,
+        &config,
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHORT_HASH"),
+    )?;
+    ui.output_item("citations", &citations_path.display().to_string());
 
     ui.finish("DNA QC", run_start.elapsed());
     Ok(())
@@ -497,8 +507,68 @@ fn process_single_dna_bam(
         runtime_seconds: 0.0,
         counting: None,
         dupradar: None,
+        dna: Some(dna_summary(&result, &bam_stat_result, &thresholds)),
         outputs: written,
     })
+}
+
+/// Build the JSON summary block for a `dna` run.
+fn dna_summary(
+    result: &rustqc::dna::mosdepth::MosdepthResult,
+    bam_stat: &rustqc::common::bam_stat::BamStatResult,
+    thresholds: &[u32],
+) -> summary::DnaSummary {
+    let genome_length = result.total_length();
+    let histogram =
+        rustqc::dna::mosdepth::merge_histograms(result.contigs.iter().map(|c| &c.histogram));
+
+    let coverage_thresholds = thresholds
+        .iter()
+        .map(|threshold| {
+            let at_or_above: u64 = histogram
+                .iter()
+                .filter(|(depth, _)| *depth >= threshold)
+                .map(|(_, count)| count)
+                .sum();
+            summary::CoverageThreshold {
+                threshold: *threshold,
+                pct_bases: if genome_length == 0 {
+                    0.0
+                } else {
+                    at_or_above as f64 * 100.0 / genome_length as f64
+                },
+            }
+        })
+        .collect();
+
+    // Median: walk the depth histogram until half the reference is behind us.
+    let mut seen = 0u64;
+    let mut median = 0u32;
+    for (depth, count) in &histogram {
+        seen += count;
+        if seen * 2 >= genome_length {
+            median = *depth;
+            break;
+        }
+    }
+
+    let duplicate_pct = if bam_stat.total_records == 0 {
+        0.0
+    } else {
+        bam_stat.duplicates as f64 * 100.0 / bam_stat.total_records as f64
+    };
+
+    summary::DnaSummary {
+        genome_length,
+        covered_bases: result.total_bases(),
+        mean_coverage: result.mean(),
+        median_coverage: median,
+        max_coverage: result.max(),
+        coverage_thresholds,
+        total_reads: bam_stat.total_records,
+        duplicates: bam_stat.duplicates,
+        duplicate_pct,
+    }
 }
 
 /// How many contig depth arrays may be live at once.
@@ -1038,6 +1108,7 @@ fn run_rna(args: cli::RnaArgs, ui: &Ui) -> Result<()> {
                     runtime_seconds: 0.0,
                     counting: None,
                     dupradar: None,
+                    dna: None,
                     outputs: vec![],
                 });
             }
@@ -1322,6 +1393,7 @@ impl BamResult {
             runtime_seconds: self.duration.as_secs_f64(),
             counting,
             dupradar,
+            dna: None,
             outputs: self
                 .outputs
                 .iter()

@@ -301,3 +301,61 @@ fn binary_refuses_input_without_duplicate_marks() {
         "expected a duplicate-marking complaint, got: {combined}"
     );
 }
+
+/// The JSON summary is the machine-readable face of a run, so its DNA block is
+/// pinned against the same figures the mosdepth fixtures carry.
+#[test]
+fn json_summary_carries_the_dna_block() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let outdir = std::env::temp_dir().join("rustqc-dna-json");
+    let _ = std::fs::remove_dir_all(&outdir);
+    std::fs::create_dir_all(&outdir).unwrap();
+    let json_path = outdir.join("summary.json");
+
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_rustqc"))
+        .arg("dna")
+        .arg(root.join("tests/data/dna/test.dna.bam"))
+        .arg("--outdir")
+        .arg(&outdir)
+        .arg("--window-size")
+        .arg(WINDOW_SIZE.to_string())
+        .arg("--json-summary")
+        .arg(&json_path)
+        .arg("--quiet")
+        .status()
+        .expect("failed to run the rustqc binary");
+    assert!(status.success());
+
+    let text = std::fs::read_to_string(&json_path).unwrap();
+    // Checked as text rather than parsed: the point is that these exact
+    // figures reach the summary, and pulling in a JSON parser for one test
+    // would not make the assertion any stronger.
+    for needle in [
+        "\"genome_length\": 40001",
+        "\"covered_bases\": 247878",
+        "\"max_coverage\": 867",
+        "\"total_reads\": 5644",
+        "\"duplicates\": 1656",
+    ] {
+        assert!(
+            text.contains(needle),
+            "summary is missing {needle}:\n{text}"
+        );
+    }
+    assert!(
+        !text.contains("\"dupradar\""),
+        "a dna run must not emit the rna summary blocks"
+    );
+}
+
+/// The citations file names the tools this pipeline actually replicated.
+#[test]
+fn citations_name_the_dna_tools_only() {
+    let citations = std::fs::read_to_string(run_binary().join("CITATIONS.md")).unwrap();
+    assert!(citations.contains("mosdepth"), "mosdepth must be cited");
+    assert!(citations.contains("Samtools"), "samtools must be cited");
+    assert!(
+        !citations.contains("dupRadar") && !citations.contains("RSeQC"),
+        "a dna run must not cite the rna-only tools"
+    );
+}
