@@ -6,5 +6,7 @@
 //! alignment statistics, and the samtools-compatible output writers.
 
 pub mod bam_flags;
+pub mod bam_stat;
 pub mod cpp_rng;
 pub mod preseq;
+pub mod samtools;
