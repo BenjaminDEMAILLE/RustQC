@@ -73,12 +73,22 @@ picard CollectInsertSizeMetrics \
   -O "$expected/test.insert_size_metrics.txt" \
   -H "$tmp/insert_size_histogram.pdf"
 
+# The chart output needs R, so it goes to the scratch directory and is not
+# compared against; only the two metrics tables are fixtures.
+picard CollectGcBiasMetrics \
+  -I "$data/test.dna.bam" \
+  -O "$expected/test.gc_bias.detail_metrics.txt" \
+  -S "$expected/test.gc_bias.summary_metrics.txt" \
+  -CHART "$tmp/gc_bias.pdf" \
+  -R "$data/genome.fasta"
+
 # Picard stamps a start time and the full command line, absolute paths and all,
 # into the first four lines of every metrics file. Those are dropped: they would
 # change on every regeneration and say nothing about the numbers. The
 # "## METRICS CLASS" and "## HISTOGRAM" markers further down are part of the
 # format and are kept.
-for f in "$expected/test.wgs_metrics.txt" "$expected/test.insert_size_metrics.txt"; do
+for f in "$expected/test.wgs_metrics.txt" "$expected/test.insert_size_metrics.txt" \
+         "$expected/test.gc_bias.detail_metrics.txt" "$expected/test.gc_bias.summary_metrics.txt"; do
   sed -e '/^## htsjdk\.samtools\.metrics\.StringHeader$/d' -e '/^# /d' "$f" \
     | sed -e '/./,$!d' > "$f.tmp" && mv "$f.tmp" "$f"
 done

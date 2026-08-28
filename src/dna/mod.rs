@@ -5,6 +5,7 @@
 //! and preseq are shared with the RNA pipeline and live in [`crate::common`].
 
 pub mod depth;
+pub mod gc_bias;
 pub mod insert_size;
 pub mod mosdepth;
 pub mod wgs_metrics;

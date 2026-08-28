@@ -17,6 +17,7 @@ use rust_htslib::bam::Read as BamRead;
 use rust_htslib::{bam, bgzf};
 
 use rustqc::dna::depth::{DepthAccum, MOSDEPTH_DEFAULT_EXCLUDE};
+use rustqc::dna::gc_bias::{self, GcBiasAccum};
 use rustqc::dna::insert_size::{self, InsertSizeAccum};
 use rustqc::dna::mosdepth::{output, ContigDepth, MosdepthResult};
 use rustqc::dna::wgs_metrics::{self, WgsAccum, WgsMetricsResult};
@@ -651,5 +652,71 @@ fn wgs_metrics_are_skipped_without_a_reference() {
     assert!(
         outdir.join("picard/insert_size").exists(),
         "insert size needs no reference and must still be written"
+    );
+}
+
+// ===================================================================
+// Picard CollectGcBiasMetrics
+// ===================================================================
+
+fn gc_bias_result() -> gc_bias::GcBiasResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let reference: Vec<u8> = {
+        let text = std::fs::read_to_string(root.join("tests/data/dna/genome.fasta")).unwrap();
+        text.lines()
+            .filter(|l| !l.starts_with('>'))
+            .flat_map(|l| l.bytes())
+            .collect()
+    };
+
+    let mut accum = GcBiasAccum::new(&reference, gc_bias::DEFAULT_WINDOW_SIZE);
+    let mut reader = bam::Reader::from_path(root.join("tests/data/dna/test.dna.bam")).unwrap();
+    let mut record = bam::Record::new();
+    while let Some(result) = reader.read(&mut record) {
+        result.unwrap();
+        accum.process_read(&record, &reference);
+    }
+    accum.into_result(gc_bias::DEFAULT_WINDOW_SIZE)
+}
+
+/// The window table and the read assignment are the two rules that black-box
+/// inference could not recover, so they are pinned before anything derived
+/// from them.
+#[test]
+fn gc_bias_windows_and_read_starts_match_picard() {
+    let result = gc_bias_result();
+    let windows: u64 = result.rows.iter().map(|r| r.windows).sum();
+    let read_starts: u64 = result.rows.iter().map(|r| r.read_starts).sum();
+    assert_eq!(
+        windows, 39_900,
+        "sliding windows run from position 1 to len - window_size - 1"
+    );
+    assert_eq!(
+        read_starts, 5_642,
+        "secondary alignments count towards read starts"
+    );
+    assert_eq!(result.total_clusters, 2_822);
+    assert_eq!(result.aligned_reads, 5_642);
+}
+
+#[test]
+fn gc_bias_detail_metrics_match_picard() {
+    let path = scratch("test.gc_bias.detail_metrics.txt");
+    gc_bias::write_detail_metrics(&gc_bias_result(), &path).unwrap();
+    assert_same_lines(
+        &std::fs::read_to_string(&path).unwrap(),
+        &std::fs::read_to_string(fixture("test.gc_bias.detail_metrics.txt")).unwrap(),
+        "GC bias detail metrics",
+    );
+}
+
+#[test]
+fn gc_bias_summary_metrics_match_picard() {
+    let path = scratch("test.gc_bias.summary_metrics.txt");
+    gc_bias::write_summary_metrics(&gc_bias_result(), &path).unwrap();
+    assert_same_lines(
+        &std::fs::read_to_string(&path).unwrap(),
+        &std::fs::read_to_string(fixture("test.gc_bias.summary_metrics.txt")).unwrap(),
+        "GC bias summary metrics",
     );
 }
