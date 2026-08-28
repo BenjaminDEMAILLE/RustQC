@@ -12,6 +12,7 @@
 set -euo pipefail
 
 MOSDEPTH_VERSION="0.3.14"
+PICARD_VERSION="3.4.0"
 SAMTOOLS_VERSION="1.24"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +21,7 @@ expected="$here/expected/dna"
 base="https://raw.githubusercontent.com/nf-core/test-datasets/modules/data/genomics/homo_sapiens"
 
 have() { command -v "$1" >/dev/null || { echo "missing tool: $1" >&2; exit 1; }; }
-have samtools; have mosdepth; have curl
+have samtools; have mosdepth; have curl; have java
 
 check_version() {
   local tool="$1" want="$2" got
@@ -50,10 +51,42 @@ samtools markdup -S "$tmp/cs.bam" "$data/test.dna.bam"
 samtools index "$data/test.dna.bam"
 
 mosdepth --by 500 --thresholds 1,5,10,15,20,30,50 "$expected/test" "$data/test.dna.bam"
+
+# Picard is a jar rather than a command, so it is fetched by version instead of
+# version-checked. The JVM locale is pinned: a French default locale writes
+# "3,531312" where an English one writes "3.531312", which would make the
+# fixtures depend on the machine that produced them.
+picard_jar="$tmp/picard-$PICARD_VERSION.jar"
+curl -sSfL -o "$picard_jar" \
+  "https://github.com/broadinstitute/picard/releases/download/$PICARD_VERSION/picard.jar"
+picard() {
+  java -Duser.language=en -Duser.country=US -jar "$picard_jar" "$@" 2>/dev/null
+}
+
+picard CollectWgsMetrics \
+  -I "$data/test.dna.bam" \
+  -O "$expected/test.wgs_metrics.txt" \
+  -R "$data/genome.fasta"
+
+picard CollectInsertSizeMetrics \
+  -I "$data/test.dna.bam" \
+  -O "$expected/test.insert_size_metrics.txt" \
+  -H "$tmp/insert_size_histogram.pdf"
+
+# Picard stamps a start time and the full command line, absolute paths and all,
+# into the first four lines of every metrics file. Those are dropped: they would
+# change on every regeneration and say nothing about the numbers. The
+# "## METRICS CLASS" and "## HISTOGRAM" markers further down are part of the
+# format and are kept.
+for f in "$expected/test.wgs_metrics.txt" "$expected/test.insert_size_metrics.txt"; do
+  sed -e '/^## htsjdk\.samtools\.metrics\.StringHeader$/d' -e '/^# /d' "$f" \
+    | sed -e '/./,$!d' > "$f.tmp" && mv "$f.tmp" "$f"
+done
 samtools stats    "$data/test.dna.bam" > "$expected/test.stats.txt"
 samtools flagstat "$data/test.dna.bam" > "$expected/test.flagstat.txt"
 samtools idxstats "$data/test.dna.bam" > "$expected/test.idxstats.txt"
 
-printf 'mosdepth\t%s\nsamtools\t%s\n' "$MOSDEPTH_VERSION" "$SAMTOOLS_VERSION" > "$expected/VERSIONS.txt"
+printf 'mosdepth\t%s\nsamtools\t%s\npicard\t%s\n' \
+  "$MOSDEPTH_VERSION" "$SAMTOOLS_VERSION" "$PICARD_VERSION" > "$expected/VERSIONS.txt"
 
 echo "Regenerated $(find "$data" "$expected" -type f | wc -l | tr -d ' ') files."

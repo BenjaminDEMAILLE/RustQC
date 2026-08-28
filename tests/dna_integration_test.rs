@@ -17,6 +17,7 @@ use rust_htslib::bam::Read as BamRead;
 use rust_htslib::{bam, bgzf};
 
 use rustqc::dna::depth::{DepthAccum, MOSDEPTH_DEFAULT_EXCLUDE};
+use rustqc::dna::insert_size::{self, InsertSizeAccum};
 use rustqc::dna::mosdepth::{output, ContigDepth, MosdepthResult};
 
 /// Window size and thresholds the fixtures were generated with.
@@ -410,4 +411,61 @@ fn csi_indexes_answer_region_queries_like_mosdepths() {
         assert!(!mine.is_empty(), "{suffix}: the query returned nothing");
         assert_eq!(mine, theirs, "{suffix}: region query results differ");
     }
+}
+
+// ===================================================================
+// Picard CollectInsertSizeMetrics
+// ===================================================================
+
+/// Drive the insert size accumulator over the whole test BAM.
+fn insert_size_result() -> insert_size::InsertSizeResult {
+    let bam_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/dna/test.dna.bam");
+    let mut reader = bam::Reader::from_path(&bam_path).unwrap();
+    let mut accum = InsertSizeAccum::new();
+    let mut record = bam::Record::new();
+    while let Some(result) = reader.read(&mut record) {
+        result.unwrap();
+        accum.process_read(&record);
+    }
+    accum.into_result(insert_size::DEFAULT_DEVIATIONS)
+}
+
+#[test]
+fn insert_size_metrics_match_picard() {
+    let path = scratch("test.insert_size_metrics.txt");
+    insert_size::write_insert_size_metrics(&insert_size_result(), &path).unwrap();
+    assert_same_lines(
+        &std::fs::read_to_string(&path).unwrap(),
+        &std::fs::read_to_string(fixture("test.insert_size_metrics.txt")).unwrap(),
+        "insert size metrics",
+    );
+}
+
+/// The headline figures, pinned separately so a failure in the metrics row is
+/// easy to tell apart from a failure in the histogram below it.
+#[test]
+fn insert_size_headline_figures_match_picard() {
+    let result = insert_size_result();
+    let fr = result
+        .rows
+        .iter()
+        .find(|r| r.orientation == insert_size::PairOrientation::Fr)
+        .expect("the fixture library is FR");
+    assert_eq!(fr.read_pairs, 1992, "read pairs");
+    assert_eq!(fr.median, 122, "median insert size");
+    assert_eq!(fr.mode, 96, "mode");
+    assert_eq!(fr.median_absolute_deviation, 23, "MAD");
+    assert_eq!(fr.min, 32, "minimum");
+    assert_eq!(fr.max, 300, "maximum");
+    assert!((fr.mean - 124.442269).abs() < 1e-6, "mean was {}", fr.mean);
+    assert!(
+        (fr.standard_deviation - 32.720214).abs() < 1e-6,
+        "standard deviation was {}",
+        fr.standard_deviation
+    );
+    assert_eq!(
+        fr.widths,
+        vec![9, 19, 27, 37, 47, 57, 69, 83, 103, 127, 181],
+        "the eleven percentile widths"
+    );
 }
