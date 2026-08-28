@@ -82,6 +82,8 @@ src/
     hs_metrics.rs     — Picard CollectHsMetrics reimplementation (targeted mode)
     insert_size.rs    — Picard CollectInsertSizeMetrics reimplementation
     intervals.rs      — BED interval parsing and merging for targeted mode
+    qualimap.rs       — Qualimap bamqc accumulation (windows, coverage, composition)
+    qualimap_output.rs — genome_results.txt, the raw data tables and the HTML report
     wgs_metrics.rs    — Picard CollectWgsMetrics reimplementation
     mosdepth/
       mod.rs          — Per-contig summarisation feeding the mosdepth outputs

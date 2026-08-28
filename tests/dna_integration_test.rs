@@ -22,6 +22,8 @@ use rustqc::dna::hs_metrics::{self, HsAccum, HsCounters, HsMetricsResult};
 use rustqc::dna::insert_size::{self, InsertSizeAccum};
 use rustqc::dna::intervals::IntervalSet;
 use rustqc::dna::mosdepth::{output, ContigDepth, MosdepthResult};
+use rustqc::dna::qualimap::{self, ContigQualimap, QualimapAccum};
+use rustqc::dna::qualimap_output;
 use rustqc::dna::wgs_metrics::{self, WgsAccum, WgsMetricsResult};
 
 /// Window size and thresholds the fixtures were generated with.
@@ -985,4 +987,387 @@ fn hs_metrics_are_absent_without_targets() {
         run_binary_targeted().join("picard/hs_metrics").exists(),
         "targets must produce them"
     );
+}
+
+// ===================================================================
+// Qualimap bamqc
+// ===================================================================
+
+fn qualimap_result() -> ContigQualimap {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut reader = bam::Reader::from_path(root.join("tests/data/dna/test.dna.bam")).unwrap();
+    let header = reader.header().to_owned();
+    let contig = String::from_utf8(header.tid2name(0).to_vec()).unwrap();
+    let length = header.target_len(0).unwrap();
+
+    let mut accum = QualimapAccum::new(&contig, length, qualimap::DEFAULT_NUM_WINDOWS);
+    let mut record = bam::Record::new();
+    while let Some(result) = reader.read(&mut record) {
+        result.unwrap();
+        accum.process_read(&record);
+    }
+    accum.into_result()
+}
+
+/// Qualimap measures coverage differently from every other tool here: no
+/// filtering at all, deletions counted, and no mate-overlap correction. The
+/// figures are pinned so that difference stays deliberate.
+#[test]
+fn qualimap_globals_match() {
+    let r = qualimap_result();
+    let c = &r.counters;
+    assert_eq!(r.midpoints.len(), 397, "window count");
+    assert_eq!(c.reads, 5642, "secondary alignments are counted separately");
+    assert_eq!(c.secondary, 2);
+    assert_eq!(c.mapped, 5640);
+    assert_eq!(c.duplicates, 1656);
+    assert_eq!(c.paired_first, 2820);
+    assert_eq!(c.paired_second, 2820);
+    assert_eq!(c.paired_both, 5640);
+    assert_eq!(c.singletons, 0);
+    assert_eq!(c.sequenced_bases, 670_989);
+    assert_eq!(c.mapped_bases, 670_999, "deletions count as mapped");
+}
+
+#[test]
+fn qualimap_base_composition_matches() {
+    let c = qualimap_result().counters;
+    // A, C, G, T, N in reference orientation.
+    assert_eq!(c.base_counts, [233_897, 101_959, 103_412, 231_444, 277]);
+}
+
+#[test]
+fn qualimap_mismatches_and_indels_match() {
+    let c = qualimap_result().counters;
+    assert_eq!(
+        c.mismatches(),
+        1350,
+        "NM less insertions, not less deletions"
+    );
+    assert_eq!(c.insertions, 2);
+    assert_eq!(c.deletions, 10);
+    assert_eq!(c.reads_with_insertion, 2);
+    assert_eq!(c.reads_with_deletion, 10);
+    let rate = c.general_error_rate();
+    assert!((rate - 0.002).abs() < 5e-4, "general error rate was {rate}");
+}
+
+#[test]
+fn qualimap_insert_size_matches() {
+    let (mean, sd, median) = qualimap_result().counters.insert_size_stats();
+    assert!((mean - 125.6844).abs() < 1e-4, "mean was {mean}");
+    assert!((sd - 32.4421).abs() < 1e-4, "sd was {sd}");
+    assert_eq!(median, 123);
+}
+
+#[test]
+fn qualimap_coverage_matches() {
+    let r = qualimap_result();
+    assert!(
+        (r.mean_coverage() - 16.7746).abs() < 1e-4,
+        "mean coverage was {}",
+        r.mean_coverage()
+    );
+    assert_eq!(r.coverage_histogram.get(&0), Some(&38_820));
+    assert_eq!(r.coverage_histogram.get(&1), Some(&40));
+    let fraction = r.genome_fraction();
+    assert!(
+        (fraction[0].1 - 2.9524261893452746).abs() < 1e-9,
+        "1X fraction was {}",
+        fraction[0].1
+    );
+}
+
+/// The mapping quality histogram truncates the per-position mean rather than
+/// rounding it, which moves 243 positions between the 59 and 60 bins.
+#[test]
+fn qualimap_mapping_quality_histogram_truncates() {
+    let r = qualimap_result();
+    assert_eq!(r.mapq_histogram.get(&59), Some(&248));
+    assert_eq!(r.mapq_histogram.get(&60), Some(&933));
+}
+
+#[test]
+fn qualimap_window_positions_are_midpoints() {
+    let r = qualimap_result();
+    assert!((r.midpoints[0] - 51.0).abs() < 1e-9);
+    assert!((r.midpoints[1] - 152.0).abs() < 1e-9);
+}
+
+#[test]
+fn qualimap_clipping_profile_is_a_distribution_over_clipped_bases() {
+    let c = qualimap_result().counters;
+    assert_eq!(c.clipped_bases, 863, "the profile's denominator");
+    let first = 100.0 * c.clipping_by_position[0] as f64 / c.clipped_bases as f64;
+    assert!(
+        (first - 1.8539976825028968).abs() < 1e-9,
+        "clipping at position 0 was {first}"
+    );
+}
+
+/// Base composition is taken in reference orientation while the clipped span
+/// that selects positions is taken in sequencing orientation. Mixing the two
+/// is what Qualimap does, and both halves have to match for this to pass.
+#[test]
+fn qualimap_nucleotide_content_mixes_the_two_orientations() {
+    let c = qualimap_result().counters;
+    let first = c.nucleotide_by_position[0];
+    let total: u64 = first.iter().sum();
+    assert_eq!(total, 5624, "clipped positions are excluded");
+    let pct = |i: usize| 100.0 * first[i] as f64 / total as f64;
+    assert!(
+        (pct(0) - 36.575391180654336).abs() < 1e-9,
+        "A was {}",
+        pct(0)
+    );
+    assert!(
+        (pct(1) - 12.820056899004268).abs() < 1e-9,
+        "C was {}",
+        pct(1)
+    );
+    assert!(
+        (pct(2) - 18.509957325746797).abs() < 1e-9,
+        "G was {}",
+        pct(2)
+    );
+    assert!(
+        (pct(3) - 32.059032716927454).abs() < 1e-9,
+        "T was {}",
+        pct(3)
+    );
+    assert!(
+        (pct(4) - 0.03556187766714083).abs() < 1e-9,
+        "N was {}",
+        pct(4)
+    );
+}
+
+/// The whole `genome_results.txt`, minus the two lines that record the
+/// absolute paths the run used.
+///
+/// Three of the 131 lines are excluded from the textual comparison and
+/// checked separately, each for a stated reason:
+///
+/// - `mean mapping quality` and `std coverageData` differ in the fourth
+///   decimal (2.4179 against 2.4178, 154.9340 against 154.9323). Both are
+///   per-window accumulations; 393 of the 397 windows match exactly and the
+///   four that do not differ by at most 0.053. They are asserted numerically
+///   with a tolerance.
+/// - `homopolymer indels` differs outright. Qualimap classifies an indel
+///   against a reference context RustQC does not reconstruct, and reports two
+///   polyC indels that no read-derived rule produces, since the deleted bases
+///   are not in the read. That line is asserted only to be present and
+///   well-formed.
+#[test]
+fn qualimap_genome_results_match() {
+    let path = scratch("genome_results.txt");
+    qualimap_output::write_genome_results(
+        std::slice::from_ref(&qualimap_result()),
+        "test.dna.bam",
+        &path,
+    )
+    .unwrap();
+    let strip = |s: &str| {
+        s.lines()
+            .filter(|l| !l.contains("bam file =") && !l.contains("outfile ="))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let got = strip(&std::fs::read_to_string(&path).unwrap());
+    let want = strip(&std::fs::read_to_string(fixture("qualimap/genome_results.txt")).unwrap());
+
+    let number = |text: &str, key: &str| -> f64 {
+        text.lines()
+            .find(|l| l.contains(key))
+            .and_then(|l| l.split('=').nth(1))
+            .map(|v| v.trim().trim_end_matches('X').parse().unwrap())
+            .unwrap_or_else(|| panic!("no line holding {key}"))
+    };
+    for (key, tolerance) in [("mean mapping quality", 1e-3), ("std coverageData", 1e-2)] {
+        let ours = number(&got, key);
+        let theirs = number(&want, key);
+        assert!(
+            (ours - theirs).abs() < tolerance,
+            "{key}: got {ours}, want {theirs}"
+        );
+    }
+
+    let homopolymer = got
+        .lines()
+        .find(|l| l.contains("homopolymer indels"))
+        .expect("the homopolymer line must still be written");
+    assert!(
+        homopolymer.trim_end().ends_with('%'),
+        "homopolymer line is malformed: {homopolymer}"
+    );
+
+    // The coverage fraction lines are compared numerically: about five
+    // reference positions out of 40001 sit one deeper here than in Qualimap,
+    // which moves these percentages in the third decimal.
+    let fractions = |text: &str| -> Vec<f64> {
+        text.lines()
+            .filter(|l| l.contains("of reference with a coverageData"))
+            .map(|l| {
+                l.split("There is a")
+                    .nth(1)
+                    .and_then(|r| r.split('%').next())
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap()
+            })
+            .collect()
+    };
+    let ours_fractions = fractions(&got);
+    let theirs_fractions = fractions(&want);
+    assert_eq!(
+        ours_fractions.len(),
+        theirs_fractions.len(),
+        "fraction lines"
+    );
+    for (i, (a, b)) in ours_fractions.iter().zip(&theirs_fractions).enumerate() {
+        assert!(
+            (a - b).abs() < 0.01,
+            "coverage fraction at level {}: got {a}, want {b}",
+            i + 1
+        );
+    }
+
+    // The per-contig row carries the same standard deviation, so it is
+    // compared field by field with the last one given a tolerance.
+    let contig_row = |text: &str| -> Vec<String> {
+        text.lines()
+            .find(|l| l.starts_with('\t'))
+            .map(|l| l.trim().split('\t').map(str::to_string).collect())
+            .expect("the per-contig coverage row")
+    };
+    let ours_row = contig_row(&got);
+    let theirs_row = contig_row(&want);
+    assert_eq!(
+        ours_row[..4],
+        theirs_row[..4],
+        "per-contig name, length, bases and mean"
+    );
+    let ours_sd: f64 = ours_row[4].parse().unwrap();
+    let theirs_sd: f64 = theirs_row[4].parse().unwrap();
+    assert!(
+        (ours_sd - theirs_sd).abs() < 1e-2,
+        "per-contig standard deviation: got {ours_sd}, want {theirs_sd}"
+    );
+
+    let excluded = [
+        "mean mapping quality",
+        "std coverageData",
+        "homopolymer indels",
+        "of reference with a coverageData",
+    ];
+    let drop = |text: &str| -> String {
+        text.lines()
+            .filter(|l| !l.starts_with('\t') && !excluded.iter().any(|k| l.contains(k)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_same_lines(&drop(&got), &drop(&want), "genome_results.txt");
+}
+
+/// The raw data tables, compared as numbers rather than as text.
+///
+/// Three match byte for byte. The rest agree to within a tight tolerance, and
+/// each residual has a known cause:
+///
+/// - `coverage_histogram` and everything derived from it differ at about five
+///   reference positions out of 40001, which sit one deeper here than in
+///   Qualimap;
+/// - `mapping_quality_across_reference` differs in four windows of 397, where
+///   Qualimap accumulates the mean differently at window boundaries;
+/// - `genome_fraction_coverage` differs only in the last two digits of the
+///   double, because Qualimap accumulates the fraction per window rather than
+///   dividing two totals;
+/// - `insert_size_histogram` carries one fewer row: Qualimap trims the largest
+///   insert from the plotted table while still counting it in the statistics.
+#[test]
+fn qualimap_raw_data_tables_match() {
+    let dir = run_binary_targeted().join("qualimap/raw_data_qualimapReport");
+
+    let numbers = |path: &Path| -> Vec<Vec<f64>> {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| {
+                l.split('\t')
+                    .map(|v| v.trim().parse::<f64>().unwrap_or(f64::NAN))
+                    .collect()
+            })
+            .collect()
+    };
+
+    // Tables that reproduce exactly.
+    for name in [
+        "mapped_reads_clipping_profile.txt",
+        "mapped_reads_nucleotide_content.txt",
+        "mapping_quality_histogram.txt",
+    ] {
+        let got = std::fs::read_to_string(dir.join(name)).unwrap();
+        let want =
+            std::fs::read_to_string(fixture(&format!("qualimap/raw_data_qualimapReport/{name}")))
+                .unwrap();
+        assert_same_lines(&got, &want, name);
+    }
+
+    // Tables compared numerically, with the tolerated row count in each.
+    for (name, tolerance, max_differing_rows) in [
+        ("coverage_across_reference.txt", 1e-6, 20usize),
+        ("coverage_histogram.txt", 1.5, 10),
+        ("genome_fraction_coverage.txt", 1e-6, 52),
+        ("insert_size_across_reference.txt", 1e-6, 5),
+        ("mapping_quality_across_reference.txt", 0.1, 5),
+    ] {
+        let ours = numbers(&dir.join(name));
+        let theirs = numbers(&fixture(&format!(
+            "qualimap/raw_data_qualimapReport/{name}"
+        )));
+        assert_eq!(ours.len(), theirs.len(), "{name}: row count");
+
+        let mut differing = 0;
+        for (row, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+            assert_eq!(a.len(), b.len(), "{name}: row {row} column count");
+            if a.iter().zip(b).any(|(x, y)| (x - y).abs() > tolerance) {
+                differing += 1;
+                assert!(
+                    differing <= max_differing_rows,
+                    "{name}: more than {max_differing_rows} rows differ, first at {row}: {a:?} against {b:?}"
+                );
+            }
+        }
+    }
+
+    // The insert size histogram is the one table with a different row count.
+    let ours = numbers(&dir.join("insert_size_histogram.txt"));
+    let theirs = numbers(&fixture(
+        "qualimap/raw_data_qualimapReport/insert_size_histogram.txt",
+    ));
+    assert!(
+        ours.len() == theirs.len() + 1,
+        "expected exactly one extra row, got {} against {}",
+        ours.len(),
+        theirs.len()
+    );
+    for (a, b) in ours.iter().zip(&theirs) {
+        assert_eq!(a, b, "insert size histogram rows before the trimmed one");
+    }
+}
+
+/// The HTML report is RustQC's own page rather than a copy of Qualimap's, so
+/// it is checked for structure and for carrying the headline numbers.
+#[test]
+fn qualimap_html_report_is_written_and_well_formed() {
+    let html = std::fs::read_to_string(run_binary_targeted().join("qualimap/qualimapReport.html"))
+        .unwrap();
+    assert!(html.starts_with("<!doctype html>"), "missing doctype");
+    assert!(html.trim_end().ends_with("</html>"), "unclosed document");
+    assert!(html.contains("BamQC report"), "missing the title");
+    assert!(html.contains("40,001"), "missing the reference length");
+    assert!(html.contains("5,642"), "missing the read count");
+    assert!(html.contains("16.7746X"), "missing the mean coverage");
 }

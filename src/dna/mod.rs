@@ -10,4 +10,6 @@ pub mod hs_metrics;
 pub mod insert_size;
 pub mod intervals;
 pub mod mosdepth;
+pub mod qualimap;
+pub mod qualimap_output;
 pub mod wgs_metrics;

@@ -78,6 +78,7 @@ export default defineConfig({
             { label: "Overview", slug: "dna/overview" },
             { label: "mosdepth", slug: "dna/mosdepth" },
             { label: "Picard metrics", slug: "dna/picard" },
+            { label: "Qualimap bamqc", slug: "dna/qualimap" },
           ],
         },
         {

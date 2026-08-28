@@ -148,6 +148,9 @@ pub fn write_dna_citations(
     if config.samtools.enabled {
         write_citation(&mut w, &SAMTOOLS_DNA)?;
     }
+    if config.qualimap.enabled {
+        write_citation(&mut w, &QUALIMAP)?;
+    }
     if config.preseq.enabled {
         write_citation(&mut w, &PRESEQ)?;
     }

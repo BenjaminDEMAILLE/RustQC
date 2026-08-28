@@ -988,6 +988,10 @@ pub struct DnaConfig {
     #[serde(default)]
     pub hs_metrics: HsMetricsConfig,
 
+    /// Qualimap bamqc configuration.
+    #[serde(default)]
+    pub qualimap: BamqcConfig,
+
     /// preseq lc_extrap library complexity extrapolation configuration.
     ///
     /// Reuses the same type as the `rna` pipeline; the implementation is shared.
@@ -1028,6 +1032,38 @@ impl Default for WgsMetricsConfig {
             coverage_cap: 250,
             min_base_quality: 20,
             min_mapping_quality: 20,
+        }
+    }
+}
+
+/// Configuration for the Qualimap-compatible bamqc report.
+///
+/// Named apart from the `rna` pipeline's [`QualimapConfig`], which configures
+/// a different Qualimap analysis entirely: gene body coverage rather than
+/// bamqc.
+///
+/// Example:
+/// ```yaml
+/// qualimap:
+///   enabled: true
+///   num_windows: 400
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct BamqcConfig {
+    /// Whether to produce the bamqc outputs. Defaults to true.
+    pub enabled: bool,
+    /// Target number of windows the reference is split into. The realised
+    /// count is usually a little lower, because the window width is rounded up
+    /// first.
+    pub num_windows: usize,
+}
+
+impl Default for BamqcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            num_windows: 400,
         }
     }
 }

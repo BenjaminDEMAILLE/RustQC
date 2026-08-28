@@ -13,6 +13,7 @@ set -euo pipefail
 
 MOSDEPTH_VERSION="0.3.14"
 PICARD_VERSION="3.4.0"
+QUALIMAP_VERSION="2.3"
 SAMTOOLS_VERSION="1.24"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +22,7 @@ expected="$here/expected/dna"
 base="https://raw.githubusercontent.com/nf-core/test-datasets/modules/data/genomics/homo_sapiens"
 
 have() { command -v "$1" >/dev/null || { echo "missing tool: $1" >&2; exit 1; }; }
-have samtools; have mosdepth; have curl; have java
+have samtools; have mosdepth; have curl; have java; have unzip
 
 check_version() {
   local tool="$1" want="$2" got
@@ -114,7 +115,27 @@ samtools stats    "$data/test.dna.bam" > "$expected/test.stats.txt"
 samtools flagstat "$data/test.dna.bam" > "$expected/test.flagstat.txt"
 samtools idxstats "$data/test.dna.bam" > "$expected/test.idxstats.txt"
 
-printf 'mosdepth\t%s\nsamtools\t%s\npicard\t%s\n' \
-  "$MOSDEPTH_VERSION" "$SAMTOOLS_VERSION" "$PICARD_VERSION" > "$expected/VERSIONS.txt"
+# Qualimap ships as a zip rather than a single jar, and its launcher passes
+# -XX:MaxPermSize, which modern JVMs reject, so the main class is invoked
+# directly. The locale is pinned for the same reason as Picard's.
+curl -sSfL -o "$tmp/qualimap.zip" \
+  "https://bitbucket.org/kokonech/qualimap/downloads/qualimap_v$QUALIMAP_VERSION.zip"
+unzip -q -o "$tmp/qualimap.zip" -d "$tmp"
+qm_dir="$tmp/qualimap_v$QUALIMAP_VERSION"
+java -Duser.language=en -Duser.country=US -Xmx2G \
+  -cp "$qm_dir/qualimap.jar:$qm_dir/lib/*" \
+  org.bioinfo.ngs.qc.qualimap.main.NgsSmartMain bamqc \
+  -bam "$data/test.dna.bam" -outdir "$tmp/qualimap" -nt 1 >/dev/null 2>&1
+
+mkdir -p "$expected/qualimap"
+# The Input section records the absolute paths it was run with, which would
+# make the fixture depend on the machine that produced it.
+grep -v "bam file =\|outfile =" "$tmp/qualimap/genome_results.txt" \
+  > "$expected/qualimap/genome_results.txt"
+cp -R "$tmp/qualimap/raw_data_qualimapReport" "$expected/qualimap/"
+
+printf 'mosdepth\t%s\nsamtools\t%s\npicard\t%s\nqualimap\t%s\n' \
+  "$MOSDEPTH_VERSION" "$SAMTOOLS_VERSION" "$PICARD_VERSION" "$QUALIMAP_VERSION" \
+  > "$expected/VERSIONS.txt"
 
 echo "Regenerated $(find "$data" "$expected" -type f | wc -l | tr -d ' ') files."

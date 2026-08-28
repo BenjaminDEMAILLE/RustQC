@@ -10,8 +10,9 @@
   alignment with one worker per contig, plus Picard-compatible
   CollectWgsMetrics, CollectInsertSizeMetrics and CollectGcBiasMetrics.
   Passing `--targets` switches on targeted mode and Picard-compatible
-  CollectHsMetrics. Validated for exact parity against mosdepth 0.3.14,
-  samtools 1.24 and Picard 3.4.0.
+  CollectHsMetrics. Qualimap-compatible `bamqc` output rounds it out, with
+  `genome_results.txt`, the raw data tables and an HTML summary. Validated
+  against mosdepth 0.3.14, samtools 1.24, Picard 3.4.0 and Qualimap 2.3.
 
 ### Changed
 

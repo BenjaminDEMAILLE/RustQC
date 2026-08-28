@@ -257,6 +257,8 @@ fn process_single_dna_bam(
     use rustqc::dna::insert_size::{self, InsertSizeAccum};
     use rustqc::dna::intervals::IntervalSet;
     use rustqc::dna::mosdepth::{output as mos_out, ContigDepth, MosdepthResult};
+    use rustqc::dna::qualimap::{ContigQualimap, QualimapAccum};
+    use rustqc::dna::qualimap_output;
     use rustqc::dna::wgs_metrics::{self, WgsAccum, WgsCounters, WgsMetricsResult};
 
     let sample_name = args
@@ -335,6 +337,8 @@ fn process_single_dna_bam(
     let hs_enabled = config.hs_metrics.enabled && targets.is_some();
     let hs_min_mapq = config.hs_metrics.min_mapping_quality;
     let hs_min_baseq = config.hs_metrics.min_base_quality;
+    let qualimap_enabled = config.qualimap.enabled;
+    let qualimap_windows = config.qualimap.num_windows;
     let wgs_min_mapq = config.wgs_metrics.min_mapping_quality;
     let wgs_min_baseq = config.wgs_metrics.min_base_quality;
     let coverage_cap = config.wgs_metrics.coverage_cap;
@@ -349,6 +353,7 @@ fn process_single_dna_bam(
         Option<InsertSizeAccum>,
         Option<GcBiasAccum>,
         Option<(HsCounters, Vec<u32>, Vec<bool>, String)>,
+        Option<ContigQualimap>,
     );
 
     let results: Vec<Result<ContigOutput>> = pool.install(|| {
@@ -374,6 +379,8 @@ fn process_single_dna_bam(
                 // to a shared one.
                 let mut wgs = wgs_enabled.then(|| WgsAccum::new(*len, wgs_min_mapq, wgs_min_baseq));
                 let mut insert_sizes = insert_size_enabled.then(InsertSizeAccum::new);
+                let mut qualimap =
+                    qualimap_enabled.then(|| QualimapAccum::new(name, *len, qualimap_windows));
 
                 // GC bias and the targeted metrics both need per-contig
                 // context, fetched once here rather than per record.
@@ -426,6 +433,9 @@ fn process_single_dna_bam(
                     if let Some(accum) = hs.as_mut() {
                         accum.process_read(&record);
                     }
+                    if let Some(accum) = qualimap.as_mut() {
+                        accum.process_read(&record);
+                    }
                 }
 
                 let depths = depth.into_depths();
@@ -441,6 +451,7 @@ fn process_single_dna_bam(
                         let (counters, depths, mask) = accum.into_parts();
                         (counters, depths, mask, name.clone())
                     }),
+                    qualimap.map(|accum| accum.into_result()),
                 ))
             })
             .collect()
@@ -458,8 +469,9 @@ fn process_single_dna_bam(
     let mut hs_target_depths: Vec<u32> = Vec::new();
     let mut hs_target_count = 0u64;
     let mut hs_zero_targets = 0u64;
+    let mut qualimap_contigs: Vec<ContigQualimap> = Vec::new();
     for result in results {
-        let (contig, bam_stat, preseq, wgs, insert_sizes, gc, hs) = result?;
+        let (contig, bam_stat, preseq, wgs, insert_sizes, gc, hs, qualimap) = result?;
         per_contig.push(contig);
         bam_stat_total.merge(bam_stat);
         match (preseq_total.as_mut(), preseq) {
@@ -483,6 +495,9 @@ fn process_single_dna_bam(
             (Some(total), Some(part)) => total.merge(&part),
             (None, part) => gc_total = part,
             _ => {}
+        }
+        if let Some(part) = qualimap {
+            qualimap_contigs.push(part);
         }
         if let Some((counters, depths, mask, contig_name)) = hs {
             hs_counters.merge(&counters);
@@ -529,6 +544,8 @@ fn process_single_dna_bam(
                 )
             });
             let mut gc_unmapped = gc_bias_enabled.then(|| GcBiasAccum::new(&[], gc_window));
+            let mut qualimap_unmapped =
+                qualimap_enabled.then(|| QualimapAccum::new("", 0, qualimap_windows));
 
             let mut record = bam::Record::new();
             while let Some(result) = reader.read(&mut record) {
@@ -540,6 +557,9 @@ fn process_single_dna_bam(
                 if let Some(accum) = gc_unmapped.as_mut() {
                     accum.process_read(&record, &[]);
                 }
+                if let Some(accum) = qualimap_unmapped.as_mut() {
+                    accum.process_read(&record);
+                }
             }
 
             if let Some(accum) = hs_unmapped {
@@ -548,6 +568,12 @@ fn process_single_dna_bam(
             }
             if let (Some(total), Some(part)) = (gc_total.as_mut(), gc_unmapped) {
                 total.merge(&part);
+            }
+            if let (Some(first), Some(part)) = (qualimap_contigs.first_mut(), qualimap_unmapped) {
+                // The unmapped pass only moves read counters, so folding it
+                // into the first contig keeps the totals right without
+                // inventing a contig for reads that have none.
+                first.counters.merge(&part.into_result().counters);
             }
         }
     }
@@ -717,6 +743,29 @@ fn process_single_dna_bam(
         let path = dir_path.join(format!("{sample_name}.hs_metrics.txt"));
         hs_metrics::write_hs_metrics(&result, &path)?;
         record_output("picard CollectHsMetrics", path);
+    }
+
+    if !qualimap_contigs.is_empty() {
+        // Restore header order, since the workers ran longest contig first.
+        qualimap_contigs.sort_by_key(|c| {
+            order
+                .iter()
+                .position(|name| *name == c.name)
+                .unwrap_or(usize::MAX)
+        });
+        let dir_path = dir("qualimap");
+        std::fs::create_dir_all(&dir_path)?;
+        let results = dir_path.join("genome_results.txt");
+        qualimap_output::write_genome_results(&qualimap_contigs, bam_path, &results)?;
+        record_output("qualimap", results);
+        qualimap_output::write_raw_data(
+            &qualimap_contigs,
+            &dir_path.join("raw_data_qualimapReport"),
+        )?;
+        record_output("qualimap", dir_path.join("raw_data_qualimapReport"));
+        let report = dir_path.join("qualimapReport.html");
+        qualimap_output::write_html_report(&qualimap_contigs, &sample_name, &report)?;
+        record_output("qualimap", report);
     }
 
     if let Some(mut accum) = preseq_total {
