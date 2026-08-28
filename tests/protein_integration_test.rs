@@ -137,3 +137,120 @@ fn the_report_carries_composition_and_defects() {
     let count: u64 = methionine.split('\t').nth(1).unwrap().parse().unwrap();
     assert!(count > 0, "methionine should appear in a real proteome");
 }
+
+// ===================================================================
+// Mass spectrometry
+// ===================================================================
+
+/// The reference figures pyteomics produced, keyed by metric name.
+#[cfg(feature = "proteomics")]
+fn pyteomics_reference() -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(fixture("small.pyteomics.tsv"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// Every counter mzdata and pyteomics can both report, on the same file.
+///
+/// Two independent readers agreeing on 305213 peaks across 48 spectra is a
+/// stronger statement than either agreeing with itself.
+#[cfg(feature = "proteomics")]
+#[test]
+fn spectra_metrics_match_pyteomics() {
+    use rustqc::protein::spectra;
+
+    let metrics = spectra::analyse(&input("small.mzML")).unwrap();
+    let want = pyteomics_reference();
+    let integer = |key: &str| -> u64 { want[key].parse().unwrap() };
+    let float = |key: &str| -> f64 { want[key].parse().unwrap() };
+
+    assert_eq!(metrics.total_spectra(), integer("spectra"));
+    assert_eq!(metrics.total_peaks(), integer("peaks"));
+    assert_eq!(metrics.precursors, integer("precursors"));
+    assert_eq!(
+        metrics.precursors_without_charge,
+        integer("precursors_without_charge"),
+        "this file annotates no charge states, and that must be visible"
+    );
+
+    assert!(
+        (metrics.rt_min - float("rt_min")).abs() < 1e-6,
+        "rt_min was {}",
+        metrics.rt_min
+    );
+    assert!(
+        (metrics.rt_max - float("rt_max")).abs() < 1e-6,
+        "rt_max was {}",
+        metrics.rt_max
+    );
+    assert!((metrics.precursor_mz_min - float("precursor_mz_min")).abs() < 1e-4);
+    assert!((metrics.precursor_mz_max - float("precursor_mz_max")).abs() < 1e-4);
+
+    for level in [1u8, 2] {
+        let m = metrics
+            .levels
+            .get(&level)
+            .unwrap_or_else(|| panic!("no MS{level} spectra"));
+        assert_eq!(m.spectra, integer(&format!("ms{level}_spectra")));
+        assert_eq!(m.peaks, integer(&format!("ms{level}_peaks")));
+        assert_eq!(m.min_peaks, integer(&format!("ms{level}_min_peaks")));
+        assert_eq!(m.max_peaks, integer(&format!("ms{level}_max_peaks")));
+
+        // Intensities are 32-bit in the file, so the two readers accumulate
+        // them at different precision; a relative tolerance is the honest
+        // comparison rather than an exact one.
+        let want_tic = float(&format!("ms{level}_total_ion_current"));
+        let relative = (m.total_ion_current - want_tic).abs() / want_tic;
+        assert!(
+            relative < 1e-6,
+            "MS{level} total ion current: got {}, want {want_tic}, relative {relative}",
+            m.total_ion_current
+        );
+    }
+}
+
+/// The derived figures the report leans on.
+#[cfg(feature = "proteomics")]
+#[test]
+fn spectra_derived_figures_are_consistent() {
+    use rustqc::protein::spectra;
+
+    let metrics = spectra::analyse(&input("small.mzML")).unwrap();
+    assert_eq!(
+        metrics.ms2_per_ms1(),
+        Some(34.0 / 14.0),
+        "34 fragmentation scans for 14 survey scans"
+    );
+    assert!(metrics.rt_span() > 0.0, "the run spans some time");
+    assert_eq!(
+        metrics.total_peaks(),
+        metrics.levels.values().map(|l| l.peaks).sum::<u64>(),
+        "the total must be the sum of the levels"
+    );
+}
+
+/// The report is RustQC's own format, so it is checked for structure.
+#[cfg(feature = "proteomics")]
+#[test]
+fn the_spectra_report_carries_every_section() {
+    use rustqc::protein::spectra;
+
+    let metrics = spectra::analyse(&input("small.mzML")).unwrap();
+    let path = scratch("spectra_report.txt");
+    spectra::output::write_report("small.mzML", &metrics, &path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+
+    assert!(text.contains("## Run"));
+    assert!(text.contains("## Levels"));
+    assert!(text.contains("## Precursors"));
+    assert!(text.contains("spectra\t48"));
+    assert!(text.contains("without_charge\t34"));
+    assert!(
+        !text.contains("## Charge states"),
+        "this file annotates no charges, so the section is omitted"
+    );
+}

@@ -18,6 +18,10 @@
   length statistics reproducing `seqkit stats -a` exactly, plus amino acid
   composition and defect detection (internal stop codons, non-standard
   residues, duplicate sequences and identifiers) that seqkit does not report.
+- New `rustqc protein spectra` mode: mass spectrometry run QC from mzML, with
+  per-level spectrum and peak counts, total ion current, retention time range
+  and precursor charge distribution. Behind the `proteomics` cargo feature,
+  which is on by default; `--no-default-features` drops it along with mzdata.
 
 ### Changed
 

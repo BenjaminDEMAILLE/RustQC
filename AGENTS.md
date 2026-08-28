@@ -95,6 +95,10 @@ src/
       stats.rs      — Length statistics reproducing seqkit stats -a
       defects.rs    — Internal stops, non-standard residues, duplicates
       output.rs     — The seqkit-compatible table and the RustQC report
+    spectra/        — behind the `proteomics` cargo feature
+      mod.rs        — mzML reading via mzdata
+      metrics.rs    — Per-run and per-level spectrum metrics
+      output.rs     — The run report
   rna/
     mod.rs          — Re-exports the RNA submodules (dupradar, featurecounts, rseqc, qualimap)
                       and re-exports the shared ones from `common` for compatibility

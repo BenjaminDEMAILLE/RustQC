@@ -10,3 +10,9 @@
 //! - `spectra` reads mzML and asks whether a mass spectrometry run is healthy.
 
 pub mod sequence;
+
+/// Mass spectrometry analysis, available when built with the `proteomics`
+/// feature. Without it the `spectra` mode is not offered at all, rather than
+/// being offered and then failing.
+#[cfg(feature = "proteomics")]
+pub mod spectra;

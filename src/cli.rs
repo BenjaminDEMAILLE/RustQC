@@ -60,6 +60,89 @@ pub struct ProteinArgs {
 pub enum ProteinMode {
     /// Protein FASTA QC: length statistics, composition and defects.
     Sequence(ProteinSequenceArgs),
+
+    /// Mass spectrometry run QC from mzML.
+    ///
+    /// Only offered when built with the `proteomics` feature, which is on by
+    /// default. Without it the mode is absent from the help rather than
+    /// present and failing.
+    #[cfg(feature = "proteomics")]
+    Spectra(ProteinSpectraArgs),
+}
+
+/// Arguments for `protein spectra`.
+#[cfg(feature = "proteomics")]
+#[derive(Parser, Debug)]
+#[command(
+    next_line_help = false,
+    term_width = 120,
+    help_template = "\
+{about-with-newline}
+{usage-heading} {usage}
+
+{all-args}"
+)]
+pub struct ProteinSpectraArgs {
+    /// mzML file(s), plain or .gz
+    #[arg(value_name = "MZML", num_args = 1.., required = true, help_heading = "Input / Output")]
+    pub input: Vec<String>,
+
+    /// Output directory [default: .]
+    #[arg(
+        short,
+        long,
+        default_value = ".",
+        hide_default_value = true,
+        env = "RUSTQC_OUTDIR",
+        help_heading = "Input / Output"
+    )]
+    pub outdir: String,
+
+    /// Override sample name for output filenames (default: derived from filename)
+    #[arg(
+        long,
+        value_name = "NAME",
+        env = "RUSTQC_SAMPLE_NAME",
+        help_heading = "Input / Output"
+    )]
+    pub sample_name: Option<String>,
+
+    /// Write outputs to a flat directory (no subdirs)
+    #[arg(
+        long,
+        default_value_t = false,
+        env = "RUSTQC_FLAT_OUTPUT",
+        help_heading = "Input / Output"
+    )]
+    pub flat_output: bool,
+
+    /// YAML configuration file (see also: RUSTQC_CONFIG env var)
+    #[arg(short, long, value_name = "CONFIG", help_heading = "Input / Output")]
+    pub config: Option<String>,
+
+    /// JSON summary path (use "-" for stdout)
+    #[arg(short = 'j', long = "json-summary", value_name = "PATH", num_args = 0..=1, default_missing_value = "", env = "RUSTQC_JSON_SUMMARY", help_heading = "Input / Output")]
+    pub json_summary: Option<String>,
+
+    /// Suppress output except warnings/errors
+    #[arg(
+        short = 'q',
+        long,
+        conflicts_with = "verbose",
+        env = "RUSTQC_QUIET",
+        help_heading = "General"
+    )]
+    pub quiet: bool,
+
+    /// Show additional detail
+    #[arg(
+        short = 'v',
+        long,
+        conflicts_with = "quiet",
+        env = "RUSTQC_VERBOSE",
+        help_heading = "General"
+    )]
+    pub verbose: bool,
 }
 
 /// Arguments for `protein sequence`.
@@ -1063,6 +1146,8 @@ mod tests {
                     assert_eq!(args.min_length, 0);
                     assert!(!args.expect_stop);
                 }
+                #[allow(unreachable_patterns)]
+                _ => panic!("Expected the sequence mode"),
             },
             _ => panic!("Expected Protein subcommand"),
         }
@@ -1099,6 +1184,26 @@ mod tests {
                     assert!(args.expect_stop);
                     assert_eq!(args.outdir, "/tmp/out");
                 }
+                #[allow(unreachable_patterns)]
+                _ => panic!("Expected the sequence mode"),
+            },
+            _ => panic!("Expected Protein subcommand"),
+        }
+    }
+
+    #[cfg(feature = "proteomics")]
+    #[test]
+    fn test_protein_spectra_args() {
+        let cli = Cli::parse_from([
+            "rustqc", "protein", "spectra", "run.mzML", "--outdir", "/tmp/ms",
+        ]);
+        match cli.command {
+            Commands::Protein(args) => match args.mode {
+                ProteinMode::Spectra(args) => {
+                    assert_eq!(args.input, vec!["run.mzML"]);
+                    assert_eq!(args.outdir, "/tmp/ms");
+                }
+                _ => panic!("Expected the spectra mode"),
             },
             _ => panic!("Expected Protein subcommand"),
         }

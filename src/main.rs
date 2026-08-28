@@ -79,6 +79,8 @@ fn main() -> Result<()> {
         cli::Commands::Dna(args) => (args.quiet, args.verbose),
         cli::Commands::Protein(args) => match &args.mode {
             cli::ProteinMode::Sequence(args) => (args.quiet, args.verbose),
+            #[cfg(feature = "proteomics")]
+            cli::ProteinMode::Spectra(args) => (args.quiet, args.verbose),
         },
     };
     let verbosity = match (quiet, verbose) {
@@ -111,7 +113,138 @@ fn main() -> Result<()> {
 fn run_protein(args: cli::ProteinArgs, ui: &Ui) -> Result<()> {
     match args.mode {
         cli::ProteinMode::Sequence(args) => run_protein_sequence(args, ui),
+        #[cfg(feature = "proteomics")]
+        cli::ProteinMode::Spectra(args) => run_protein_spectra(args, ui),
     }
+}
+
+/// Run `protein spectra`: mass spectrometry run QC from mzML.
+#[cfg(feature = "proteomics")]
+fn run_protein_spectra(args: cli::ProteinSpectraArgs, ui: &Ui) -> Result<()> {
+    use rustqc::protein::spectra;
+
+    let run_start = Instant::now();
+    let timestamp_start = format_utc_now();
+
+    let (merged, config_paths) = config::load_merged_config(args.config.as_deref())?;
+    let config = merged.protein;
+    let flat_output = args.flat_output || config.flat_output;
+
+    let outdir = Path::new(&args.outdir);
+    std::fs::create_dir_all(outdir)
+        .with_context(|| format!("Failed to create output directory: {}", outdir.display()))?;
+
+    ui.header(
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHORT_HASH"),
+        env!("BUILD_TIMESTAMP"),
+        Some(&rustqc::cpu::cpu_info_line()),
+    );
+    for (path, source) in &config_paths {
+        ui.config("Config", &format!("{} ({source})", path.display()));
+    }
+    ui.config("Output dir", &args.outdir);
+
+    let dir = if flat_output {
+        outdir.to_path_buf()
+    } else {
+        outdir.join("spectra")
+    };
+    std::fs::create_dir_all(&dir)?;
+
+    let mut inputs = Vec::new();
+    for path in &args.input {
+        let file_start = Instant::now();
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str())
+            .to_string();
+
+        match spectra::analyse(Path::new(path)) {
+            Ok(metrics) => {
+                let sample_name = args.sample_name.clone().unwrap_or_else(|| {
+                    Path::new(path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("sample")
+                        .to_string()
+                });
+                let report = dir.join(format!("{sample_name}.spectra_report.txt"));
+                spectra::output::write_report(&name, &metrics, &report)?;
+                ui.output_item("protein spectra", &report.display().to_string());
+                ui.detail(&format!(
+                    "{name}: {} spectra, {} peaks",
+                    metrics.total_spectra(),
+                    metrics.total_peaks()
+                ));
+                if metrics.precursors > 0 && metrics.precursors_without_charge == metrics.precursors
+                {
+                    ui.warn(&format!(
+                        "{name}: no precursor charge states are annotated, so charge metrics are unavailable"
+                    ));
+                }
+
+                inputs.push(summary::InputSummary {
+                    bam_file: path.clone(),
+                    status: "success".to_string(),
+                    error: None,
+                    runtime_seconds: file_start.elapsed().as_secs_f64(),
+                    counting: None,
+                    dupradar: None,
+                    dna: None,
+                    outputs: vec![summary::OutputFile {
+                        tool: "protein spectra".to_string(),
+                        path: report.display().to_string(),
+                    }],
+                });
+            }
+            Err(e) => {
+                ui.bam_result_err(&name, &format!("{e:#}"));
+                inputs.push(summary::InputSummary {
+                    bam_file: path.clone(),
+                    status: "failed".to_string(),
+                    error: Some(format!("{e:#}")),
+                    runtime_seconds: file_start.elapsed().as_secs_f64(),
+                    counting: None,
+                    dupradar: None,
+                    dna: None,
+                    outputs: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if let Some(ref json_path) = args.json_summary {
+        let summary = summary::RunSummary {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: env!("GIT_SHORT_HASH").to_string(),
+            binary_target: cpu::binary_target().to_string(),
+            cpu_features: cpu::detected_features()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            timestamp_start,
+            timestamp_end: format_utc_now(),
+            runtime_seconds: run_start.elapsed().as_secs_f64(),
+            inputs,
+        };
+        let json = serde_json::to_string_pretty(&summary)?;
+        if json_path == "-" {
+            println!("{json}");
+        } else {
+            let path = if json_path.is_empty() {
+                outdir.join("rustqc_summary.json")
+            } else {
+                PathBuf::from(json_path)
+            };
+            std::fs::write(&path, json)
+                .with_context(|| format!("Failed to write JSON summary: {}", path.display()))?;
+        }
+    }
+
+    ui.finish("Protein spectra QC", run_start.elapsed());
+    Ok(())
 }
 
 /// Run `protein sequence`: FASTA statistics, composition and defects.
