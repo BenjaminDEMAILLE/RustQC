@@ -316,11 +316,14 @@ All branches are based on `main` and stacked in order.
    WGS matches on every column and all 251 histogram lines except
    `HET_SNP_SENSITIVITY` and `HET_SNP_Q`, which come from a Monte Carlo
    simulation and are written as `?`.
-4. **`feat/dna-targeted`** (not delivered) — `--targets` / `--baits`,
-   `CollectHsMetrics`, `CollectGcBiasMetrics`. See section 10 for how far the
-   groundwork got and what blocks each piece.
-5. **`feat/dna-qualimap-docs`** — Qualimap `bamqc` output and HTML report,
-   `docs/src/content/docs/dna/*` pages, README, CHANGELOG and AGENTS.md updates.
+4. **`feat/dna-targeted`** (delivered, PR #155) — `--targets` / `--baits`,
+   `CollectHsMetrics`, `CollectGcBiasMetrics`. Both GC bias files match Picard
+   byte for byte; HS metrics matches on all 58 columns that do not derive from
+   Picard's Monte Carlo theoretical sensitivity or its per-target GC dropout.
+5. **`feat/dna-qualimap-docs`** (partially delivered, PR #156) — the
+   `docs/src/content/docs/dna/*` pages, the `dna` CLI reference and the
+   CHANGELOG are done. Qualimap `bamqc` is not; section 11 records how far its
+   groundwork got.
 
 Each PR is independently buildable, `cargo fmt --check` and
 `cargo clippy -- -D warnings` clean, and ships its own tests.
@@ -359,71 +362,71 @@ The three points raised during design are resolved above: fixture size budget
 - **`--targets` is accepted but inert**, warning that targeted metrics are not
   implemented. Section 10 records why PR4 stalled.
 
-## 10. Findings on the two undelivered Picard collectors
+## 10. How the two Picard blockers were solved
 
-Work on PR4 stopped short of an implementation on purpose: both remaining
-collectors turned out to have rules that could not be pinned down against the
-fixture, and shipping an approximation labelled as parity would be worse than
-shipping nothing. What was established is recorded here so the next attempt
-does not start from zero.
+An earlier attempt inferred both collectors from their outputs and failed.
+Reading the upstream Java settled both within an hour, which is worth recording
+as a method note: for a tool whose output is a specification, the source is
+cheaper to read than the behaviour is to reverse-engineer.
 
-### CollectGcBiasMetrics
+**`GcBiasUtils.calculateAllGcs`** showed the window loop runs
+`for (int i = 1; i < lastWindowStart; ++i)`, clipping both ends, and that the
+GC value is integer division rather than rounding.
+**`GcBiasMetricsCollector.addRead`** showed the assignment rule:
+`rec.getReadNegativeStrandFlag() ? rec.getAlignmentEnd() - scanWindowSize : rec.getAlignmentStart()`.
+No offset applied to either end of the read reproduces that, which is why the
+black-box scan over offsets -102 to +2 found nothing. The same method showed
+unmapped reads still count towards `TOTAL_CLUSTERS`, and that only unmapped and
+empty-sequence reads are skipped, so secondary alignments contribute.
 
-**Solved: the window set.** GC is computed over sliding 100 bp windows, and
-the window set is `[i, i + 100)` for `i` from 1 to `len - 101` inclusive,
-which gives 39900 windows on the 40001 bp fixture. That is neither the obvious
-`0 ..= len - 100` (39902) nor a non-overlapping split (400). This rule was
-verified against all 101 `WINDOWS` counts of the fixture, exactly.
+**`TargetMetricsCollector.acceptRecord`** showed the filtering order:
+overlap clipping happens at the read level, before the base quality floor,
+where `CollectWgsMetrics` does the reverse. That single ordering accounts for
+the 0.8 percent discrepancy the earlier attempt could not explain.
+**htsjdk's `SAMUtils.getNumOverlappingAlignedBasesToClip`** showed that only
+the left-most mate is clipped, that the counter is of read bases while what is
+removed is reference bases from the mate's start onwards, and that
+`MATCH_OR_MISMATCH` is the `M` operator alone, so `=` and `X` lose their whole
+element.
 
-**Solved: the derived columns.** With windows and read starts in hand,
-`NORMALIZED_COVERAGE` is `(read_starts_in_bin / windows_in_bin)` over
-`(total_read_starts / total_windows)`, and `ERROR_BAR_WIDTH` is
-`sqrt(read_starts_in_bin) / windows_in_bin` over that same global rate. Both
-reproduce the fixture's values.
+Two smaller rules came from the fixtures rather than the source: `GC_NC_x_y` is
+a window-weighted mean rather than a plain average over bins, and the GC tables
+carry two trailing blank lines where the other Picard tables carry one.
 
-**Unsolved: which window a read is attributed to.** Binning reads by the
-window at their leftmost aligned position, or at their 5' end for
-reverse-strand reads, produces a distribution far from Picard's: bin 21 gets
-26 read starts where Picard reports 179. A scan over every index offset from
--102 to +2, in both leftmost and 5'-end modes, found no assignment reproducing
-the fixture. The totals agree (5642 read starts either way), so it is a
-redistribution, not a filtering difference. Since the fixture's coverage is
-concentrated on a few positions, a wrong rule moves whole blocks of reads at
-once, which is consistent with what was seen.
+## 11. Findings on Qualimap bamqc
 
-### CollectHsMetrics
+Not implemented. The groundwork below is verified against Qualimap 2.3 output
+on the project fixture and should make a later attempt short.
 
-The tractable columns were checked and the arithmetic reconciles:
-`BAIT_TERRITORY` and `TARGET_TERRITORY` are the merged interval lengths
-(35000), `GENOME_SIZE` the reference length, `PF_UNIQUE_READS` is PF reads
-less duplicates (5642 - 1656 = 3986), `PF_BASES_ALIGNED` (670989) is the same
-denominator `CollectWgsMetrics` uses, `MEAN_TARGET_COVERAGE` is
-`ON_TARGET_BASES / TARGET_TERRITORY`, and `MEAN_BAIT_COVERAGE` is
-`PF_BASES_ALIGNED / BAIT_TERRITORY`.
+**Solved.** The window count is `ceil(len / ceil(len / 400))`, giving 397
+windows of 101 bases on the 40001 base fixture. Read and base counts all
+reproduce exactly: 5642 reads (secondary excluded and reported separately),
+5640 mapped, 1656 duplicate-flagged, 670989 sequenced bases (`M`, `=`, `X`) and
+670999 mapped bases (those plus `D`). The paired counts, the insert size mean,
+population standard deviation and median, the mean coverage
+(mapped bases over reference length, with no overlap correction, hence 16.77
+where mosdepth reports 6.20) and the `coverageData >= NX` table all match.
+The global mean mapping quality is the mean of the per-window means, where an
+uncovered window contributes zero, which is why it reads 2.4178 rather than
+about 60.
 
-**The blocker is that HsMetrics does not filter the way WgsMetrics does.**
-Reusing the WgsMetrics exclusion model, without its coverage cap, gives
-`ON_TARGET_BASES` of 247070 against Picard's 245122, and every
-`PCT_TARGET_BASES_xX` is off in the fourth decimal. The two collectors report
-different base-quality and overlap exclusions on the same data
-(`PCT_EXC_BASEQ` 0.003982 against 0.007352, `PCT_EXC_OVERLAP` 0.330968
-against 0.324694), and the difference is not a reordering: the two exclusions
-sum differently as well (224745 against 222799 bases). Whatever HsMetrics does
-with overlapping mates and low-quality bases, it is a third rule, not either
-of the two already implemented.
+**Two fields still off.** Mismatches are `NM` less inserted bases only, not
+less inserted and deleted bases, which is the difference between 1340 and
+Qualimap's 1350. The ACTG content is counted in reference orientation, so
+reverse-strand reads are complemented before counting; counting them as
+sequenced puts A at 217220 against Qualimap's 233897 while the total and the N
+count still agree.
 
-**Two further columns are out of reach regardless.** `AT_DROPOUT` and
-`GC_DROPOUT` are computed from the GC bias binning above, so they inherit its
-unsolved read-assignment rule. `HET_SNP_SENSITIVITY` and `HET_SNP_Q` are the
-same Monte Carlo simulation already marked `?` in `CollectWgsMetrics`, and
-`HS_PENALTY_*X` and `FOLD_80_BASE_PENALTY` are `-1` and `?` in the fixture
-because Picard itself could not compute them on this data.
+**Two derived statistics differ in the fifth significant figure.** The mean of
+window mapping qualities comes out at 2.417942 against 2.4178, and the coverage
+standard deviation at 154.9340 against 154.9323. Both are consistent with
+Qualimap accumulating them per window, where the last partial window is handled
+differently, rather than with a wrong model.
 
-### Suggested next step
+**Also out of scope.** Twelve raw data tables and the HTML report. The spec's
+original position still holds: parity should be asserted on `genome_results.txt`
+and the raw tables, with the HTML checked for structural presence only.
 
-Read the upstream Java for `GcBiasUtils.calculateAllGcs` and
-`HsMetricCollector`'s overlap clipping rather than continuing to infer from
-outputs. Both questions are a few lines of source away and neither yielded to
-black-box inference, which is exactly the case the specification's own advice
-covers: the semantics of each upstream tool belong in a table read off the
-source, not guessed from behaviour.
+**Why it was not shipped.** Everything above would have produced a file that
+presents itself as Qualimap-compatible while carrying wrong ACTG counts. That
+is worse than shipping nothing, so the findings are recorded instead.
