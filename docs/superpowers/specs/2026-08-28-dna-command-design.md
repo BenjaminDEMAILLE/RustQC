@@ -118,23 +118,30 @@ src/
   rna/                                unchanged behaviour; re-exports the moved
                                       items so the 0.2.x library surface and all
                                       `crate::rna::...` paths keep working
-  dna/
+  dna/                                built in PR2 unless marked
     mod.rs
-    accumulators.rs                   per-read dispatch, one set per contig worker, merged at the end
-    depth.rs                          full-contig i32 delta array plus prefix sum
+    depth.rs                          full-contig i32 delta array, CIGAR walk,
+                                      mate-overlap correction, prefix sum
     mosdepth/
-      mod.rs
+      mod.rs                          per-contig summarisation, distribution rules
       output.rs                       per-base, regions, thresholds, summary, distributions
-    wgs_metrics.rs
-    insert_size.rs
-    gc_bias.rs
-    hs_metrics.rs
-    qualimap/
+    wgs_metrics.rs                    PR3
+    insert_size.rs                    PR3
+    gc_bias.rs                        PR4
+    hs_metrics.rs                     PR4
+    qualimap/                         PR5
       mod.rs
       report.rs
       plots.rs
-    plots.rs                          coverage, insert size and GC curves via plotters
+    plots.rs                          PR3 onwards: coverage, insert size and GC curves
 ```
+
+The `accumulators.rs` sketched here was not built. Per-record dispatch turned
+out to be three lines inside the contig worker in `run_dna`, feeding a
+`DepthAccum`, a `BamStatAccum` and a `PreseqAccum` directly, so a module whose
+only job was to forward one call to three others would have been indirection
+for its own sake. Revisit that when PR3 and PR4 add accumulators with their own
+filter regimes and the forwarding stops being trivial.
 
 The samtools writers consume `bam_stat`'s result type, and the counters that
 build it live in `BamStatAccum`, whose `process_read` takes only a record and a
@@ -175,8 +182,11 @@ This is the memory profile of mosdepth itself: roughly 1 GB for GRCh38 chr1
 (248,956,422 bases at 4 bytes). With unbounded rayon parallelism that becomes
 `threads x 1 GB`, so contigs are scheduled longest-first and the number of
 concurrently live depth arrays is capped by `--max-depth-workers`, defaulting to
-`min(threads, available_ram / (largest_contig_length * 4 bytes))` with a floor of
-1. The cap applies only to the depth stage; read-level accumulators are cheap and
+`min(threads, budget / (largest_contig_length * 4 bytes))` with a floor of
+1. As built, `budget` is a fixed 4 GB constant: there is no portable way to ask
+the operating system how much memory is free from std, and pulling in a
+dependency for it was not worth doing when `--max-depth-workers` already gives
+the user an exact override. The cap applies only to the depth stage; read-level accumulators are cheap and
 stay fully parallel.
 
 ### One depth accumulator is not enough
@@ -223,9 +233,13 @@ Nested subdirectories by default, all flattened into `--outdir` when
   CITATIONS.md
 ```
 
-`summary.rs` gains a `DnaSummary` variant hung off `InputSummary`, holding mean
-and median coverage, the threshold percentages, duplicate rate, insert size
-median and MAD, and, in targeted mode, fold enrichment and fold-80 base penalty.
+`summary.rs` gains a `DnaSummary` hung off `InputSummary`, holding genome
+length, covered bases, mean, median and maximum coverage, the threshold
+percentages, and the duplicate rate. Insert size figures join it in PR3, and
+fold enrichment and fold-80 base penalty in PR4. The threshold percentages are
+a list of `{threshold, pct_bases}` objects rather than a map, so the requested
+order survives serialisation; a map keyed by the threshold would sort `"10"`
+before `"5"`.
 `CountingSummary` stays RNA-specific; the two are mutually exclusive per input.
 
 `CITATIONS.md` gains the DNA tool citations with the pinned upstream versions.
@@ -285,14 +299,18 @@ BED interval parsing and merging, and the depth cap.
 
 All branches are based on `main` and stacked in order.
 
-1. **`feat/dna-common-extract`** — move `bam_flags`, `cpp_rng`, `preseq` and the
-   samtools trio into `src/common/`, add re-export shims in `rna`, update
-   `lib.rs` and `AGENTS.md`. No behaviour change; the existing test suite must
-   pass untouched. This PR is deliberately mechanical so the later diffs are
-   readable.
-2. **`feat/dna-skeleton`** — `DnaArgs`, `DnaConfig`, `run_dna`, the contig-worker
-   depth engine, samtools trio and preseq wired up for DNA, the test dataset and
-   the generation script, plus parity tests against mosdepth and samtools.
+1. **`feat/dna-common-extract`** (delivered, PR #152) — moved `bam_flags`,
+   `cpp_rng`, `preseq`, `bam_stat`, `BamStatAccum` and the samtools trio into
+   `src/common/`, with re-export shims in `rna`. No behaviour change: all 61
+   output files of a `rustqc rna` run were compared byte for byte before and
+   after.
+2. **`feat/dna-skeleton`** (delivered, PR #153) — `DnaArgs`, `DnaConfig`,
+   `run_dna`, the contig-worker depth engine with mate-overlap correction, the
+   six mosdepth outputs, the samtools trio and preseq wired up for DNA, the
+   test dataset and its generation script, the DNA JSON summary block and
+   citations, and parity tests against mosdepth 0.3.14 and samtools 1.24. Every
+   mosdepth output matches exactly; `samtools stats` matches on all 1889 data
+   lines, its header differing by design.
 3. **`feat/dna-picard-core`** — `CollectWgsMetrics` and
    `CollectInsertSizeMetrics`, their plots, and their parity fixtures.
 4. **`feat/dna-targeted`** — `--targets` / `--baits`, `CollectHsMetrics`,
@@ -321,8 +339,18 @@ Each PR is independently buildable, `cargo fmt --check` and
 - **Test fixture size budget.** Ten megabytes is tight for coverage-based
   metrics. Section 6 states what gives way if it binds.
 
-## 9. Open questions
+## 9. Open items
 
-None blocking. The three points raised during design are resolved above: fixture
-size budget (section 6), pinned upstream versions (section 6), and the RAM guard
-(section 4).
+The three points raised during design are resolved above: fixture size budget
+(section 6), pinned upstream versions (section 6), and the RAM guard
+(section 4). Three things surfaced during PR1 and PR2 and are still open:
+
+- **`.csi` companion indexes** for the bgzf outputs are not written. mosdepth
+  writes them, and `tabix` needs them. They are buildable through the
+  `tbx_index_build` FFI that hts-sys already exposes.
+- **The samtools citation constant says v1.22.1**, the version the `rna`
+  pipeline was validated against, while the DNA fixtures were generated with
+  1.24. Bumping it would imply the RNA pipeline had been revalidated, which it
+  has not, so the constant was left alone and the discrepancy flagged instead.
+- **`--targets` is accepted but inert** in PR2, warning that targeted metrics
+  are not implemented. It becomes real in PR4.
