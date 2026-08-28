@@ -101,6 +101,8 @@ src/
   common/
     mod.rs
     bam_flags.rs                      moved from rna/bam_flags.rs
+    bam_stat.rs                       moved from rna/rseqc/bam_stat.rs
+    bam_stat_accum.rs                 BamStatAccum, lifted out of rna/rseqc/accumulators.rs
     cpp_rng.rs                        moved from rna/cpp_rng.rs
     preseq.rs                         moved from rna/preseq.rs
     samtools/
@@ -128,6 +130,12 @@ src/
       plots.rs
     plots.rs                          coverage, insert size and GC curves via plotters
 ```
+
+The samtools writers consume `bam_stat`'s result type, and the counters that
+build it live in `BamStatAccum`, whose `process_read` takes only a record and a
+MAPQ cutoff. Both are therefore assay-agnostic and move into `common` as well,
+where the `dna` pipeline drives the same accumulator. This was found while
+planning PR1 and is the one departure from the layout first sketched here.
 
 `lib.rs` gains `pub mod common;` and `pub mod dna;`. The `rna` module keeps
 `pub use crate::common::{bam_flags, cpp_rng, preseq};` and
