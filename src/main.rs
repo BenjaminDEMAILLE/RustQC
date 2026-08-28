@@ -73,9 +73,13 @@ fn main() -> Result<()> {
     let cli = cli::parse_args();
 
     // Determine verbosity from CLI flags
-    let verbosity = match &cli.command {
-        cli::Commands::Rna(args) if args.quiet => Verbosity::Quiet,
-        cli::Commands::Rna(args) if args.verbose => Verbosity::Verbose,
+    let (quiet, verbose) = match &cli.command {
+        cli::Commands::Rna(args) => (args.quiet, args.verbose),
+        cli::Commands::Dna(args) => (args.quiet, args.verbose),
+    };
+    let verbosity = match (quiet, verbose) {
+        (true, _) => Verbosity::Quiet,
+        (_, true) => Verbosity::Verbose,
         _ => Verbosity::Normal,
     };
 
@@ -94,7 +98,18 @@ fn main() -> Result<()> {
 
     match cli.command {
         cli::Commands::Rna(args) => run_rna(args, &ui),
+        cli::Commands::Dna(args) => run_dna(args, &ui),
     }
+}
+
+/// Run the DNA QC pipeline: depth of coverage, samtools-compatible outputs
+/// and library complexity estimation in a single pass over each input.
+///
+/// Not implemented yet; the pipeline lands over the following tasks in this
+/// branch. The subcommand is wired up first so the CLI surface can be
+/// reviewed and tested on its own.
+fn run_dna(_args: cli::DnaArgs, _ui: &Ui) -> Result<()> {
+    anyhow::bail!("the dna subcommand is not implemented yet")
 }
 
 /// Reconstruct the command line for the featureCounts-compatible header comment.
