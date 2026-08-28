@@ -183,3 +183,121 @@ fn depth_histogram_matches_the_per_base_fixture() {
     }
     assert_eq!(result.contigs[0].histogram, expected);
 }
+
+// ===================================================================
+// End-to-end parity: the binary, not just the library
+// ===================================================================
+
+/// Run `rustqc dna` once into a scratch directory shared by every end-to-end
+/// test, with the same window size and thresholds the fixtures were made with.
+fn run_binary() -> &'static Path {
+    static OUTDIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    OUTDIR.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let outdir = std::env::temp_dir().join("rustqc-dna-e2e");
+        let _ = std::fs::remove_dir_all(&outdir);
+        std::fs::create_dir_all(&outdir).unwrap();
+
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_rustqc"))
+            .arg("dna")
+            .arg(root.join("tests/data/dna/test.dna.bam"))
+            .arg("--outdir")
+            .arg(&outdir)
+            .arg("--window-size")
+            .arg(WINDOW_SIZE.to_string())
+            .arg("--quiet")
+            .status()
+            .expect("failed to run the rustqc binary");
+        assert!(status.success(), "rustqc dna exited with {status}");
+        outdir
+    })
+}
+
+/// The sample name is the BAM file stem, dots included.
+const SAMPLE: &str = "test.dna";
+
+fn produced(subdir: &str, name: &str) -> PathBuf {
+    run_binary().join(subdir).join(name)
+}
+
+#[test]
+fn binary_writes_every_mosdepth_output_byte_for_byte() {
+    for suffix in [
+        "mosdepth.summary.txt",
+        "mosdepth.global.dist.txt",
+        "mosdepth.region.dist.txt",
+    ] {
+        let got = std::fs::read_to_string(produced("mosdepth", &format!("{SAMPLE}.{suffix}")))
+            .unwrap_or_else(|e| panic!("reading {suffix}: {e}"));
+        let want = std::fs::read_to_string(fixture(&format!("test.{suffix}"))).unwrap();
+        assert_same_lines(&got, &want, suffix);
+    }
+    for suffix in ["per-base.bed.gz", "regions.bed.gz", "thresholds.bed.gz"] {
+        let got = read_bgzf(&produced("mosdepth", &format!("{SAMPLE}.{suffix}")));
+        let want = read_bgzf(&fixture(&format!("test.{suffix}")));
+        assert_same_lines(&got, &want, suffix);
+    }
+}
+
+#[test]
+fn binary_writes_flagstat_and_idxstats_byte_for_byte() {
+    for suffix in ["flagstat", "idxstats"] {
+        let got = std::fs::read_to_string(produced("samtools", &format!("{SAMPLE}.{suffix}.txt")))
+            .unwrap();
+        let want = std::fs::read_to_string(fixture(&format!("test.{suffix}.txt"))).unwrap();
+        assert_eq!(got, want, "{suffix} must match samtools exactly");
+    }
+}
+
+/// `samtools stats` output is compared on its data lines only. RustQC writes
+/// its own `#` header, naming itself rather than reproducing samtools' command
+/// line and version banner, which is deliberate and shared with the `rna`
+/// pipeline. Everything below the header must match exactly.
+#[test]
+fn binary_writes_samtools_stats_data_lines_byte_for_byte() {
+    let got =
+        std::fs::read_to_string(produced("samtools", &format!("{SAMPLE}.stats.txt"))).unwrap();
+    let want = std::fs::read_to_string(fixture("test.stats.txt")).unwrap();
+    let strip = |s: &str| {
+        s.lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_same_lines(&strip(&got), &strip(&want), "samtools stats data lines");
+}
+
+#[test]
+fn the_stats_header_does_not_claim_the_wrong_subcommand() {
+    let got =
+        std::fs::read_to_string(produced("samtools", &format!("{SAMPLE}.stats.txt"))).unwrap();
+    assert!(
+        !got.contains("rustqc rna"),
+        "the dna pipeline must not label its output as rna output"
+    );
+}
+
+#[test]
+fn binary_refuses_input_without_duplicate_marks() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let outdir = std::env::temp_dir().join("rustqc-dna-nodup");
+    let _ = std::fs::remove_dir_all(&outdir);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rustqc"))
+        .arg("dna")
+        .arg(root.join("tests/data/test_nodup.bam"))
+        .arg("--outdir")
+        .arg(&outdir)
+        .arg("--json-summary")
+        .arg("-")
+        .output()
+        .expect("failed to run the rustqc binary");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("duplicate-flagged") || combined.contains("failed"),
+        "expected a duplicate-marking complaint, got: {combined}"
+    );
+}

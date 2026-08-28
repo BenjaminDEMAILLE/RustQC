@@ -62,7 +62,7 @@ pub fn write_stats(result: &BamStatResult, output_path: &Path) -> Result<()> {
     writeln!(out, "# This file was produced by samtools stats and RustQC")?;
     writeln!(
         out,
-        "# The command line was: rustqc rna (samtools stats compatible output)"
+        "# The command line was: rustqc (samtools stats compatible output)"
     )?;
 
     // Derived values
