@@ -14,6 +14,11 @@
   `genome_results.txt`, the raw data tables and an HTML summary. Validated
   against mosdepth 0.3.14, samtools 1.24, Picard 3.4.0 and Qualimap 2.3.
 
+- New `rustqc protein sequence` mode: protein FASTA quality control, with
+  length statistics reproducing `seqkit stats -a` exactly, plus amino acid
+  composition and defect detection (internal stop codons, non-standard
+  residues, duplicate sequences and identifiers) that seqkit does not report.
+
 ### Changed
 
 - Internal: assay-agnostic analyses (BAM flag helpers, read-level statistics,

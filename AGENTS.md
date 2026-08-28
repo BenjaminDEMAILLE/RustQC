@@ -88,6 +88,13 @@ src/
     mosdepth/
       mod.rs          — Per-contig summarisation feeding the mosdepth outputs
       output.rs       — The six mosdepth-compatible writers (bgzf for the BED outputs)
+  protein/
+    mod.rs
+    sequence/
+      mod.rs        — FASTA parsing into per-sequence records
+      stats.rs      — Length statistics reproducing seqkit stats -a
+      defects.rs    — Internal stops, non-standard residues, duplicates
+      output.rs     — The seqkit-compatible table and the RustQC report
   rna/
     mod.rs          — Re-exports the RNA submodules (dupradar, featurecounts, rseqc, qualimap)
                       and re-exports the shared ones from `common` for compatibility

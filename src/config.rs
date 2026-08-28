@@ -34,6 +34,74 @@ pub struct Config {
     /// DNA QC configuration (matches the `dna` subcommand).
     #[serde(default)]
     pub dna: DnaConfig,
+
+    /// Protein QC configuration (matches the `protein` subcommand).
+    #[serde(default)]
+    pub protein: ProteinConfig,
+}
+
+// ===================================================================
+// Protein QC configuration
+// ===================================================================
+
+/// Protein QC configuration.
+///
+/// Settings are nested under the mode they belong to, since the modes share
+/// nothing but the output directory.
+///
+/// Example:
+/// ```yaml
+/// protein:
+///   flat_output: true
+///   sequence:
+///     min_length: 50
+///     expect_stop: true
+/// ```
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct ProteinConfig {
+    /// Override the sample name used in output filenames.
+    #[serde(default)]
+    pub sample_name: Option<String>,
+
+    /// Write all output files to a flat directory (no subdirectories).
+    #[serde(default)]
+    pub flat_output: bool,
+
+    /// `protein sequence` configuration.
+    #[serde(default)]
+    pub sequence: ProteinSequenceConfig,
+}
+
+/// Configuration for the protein FASTA analysis.
+///
+/// Example:
+/// ```yaml
+/// sequence:
+///   enabled: true
+///   min_length: 50
+///   expect_stop: false
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct ProteinSequenceConfig {
+    /// Whether to run the analysis. Defaults to true.
+    pub enabled: bool,
+    /// Sequences shorter than this are ignored entirely.
+    pub min_length: usize,
+    /// Whether a missing terminal stop codon counts as a defect. Off by
+    /// default, because most reference proteomes carry no terminal stop.
+    pub expect_stop: bool,
+}
+
+impl Default for ProteinSequenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_length: 0,
+            expect_stop: false,
+        }
+    }
 }
 
 /// RNA-Seq QC configuration.
@@ -1645,5 +1713,26 @@ preseq:
         let config: Config = serde_yaml_ng::from_value(merged).unwrap();
         assert_eq!(config.dna.mosdepth.window_size, Some(500));
         assert_eq!(config.dna.mosdepth.thresholds, vec![1]);
+    }
+
+    #[test]
+    fn test_protein_config_defaults() {
+        let config = Config::default();
+        assert!(config.protein.sequence.enabled);
+        assert_eq!(config.protein.sequence.min_length, 0);
+        assert!(!config.protein.sequence.expect_stop);
+        assert!(!config.protein.flat_output);
+    }
+
+    #[test]
+    fn test_protein_config_from_yaml() {
+        let yaml = "protein:\n  flat_output: true\n  sequence:\n    min_length: 50\n    expect_stop: true\n";
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.protein.flat_output);
+        assert_eq!(config.protein.sequence.min_length, 50);
+        assert!(config.protein.sequence.expect_stop);
+        // A protein-only config leaves the other pipelines untouched.
+        assert!(config.rna.preseq.enabled);
+        assert!(config.dna.mosdepth.enabled);
     }
 }

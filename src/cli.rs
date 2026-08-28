@@ -39,6 +39,121 @@ pub enum Commands {
     /// estimation in one pass. Needs no gene annotation. Pass `--targets`
     /// to switch to targeted (exome or panel) mode.
     Dna(DnaArgs),
+
+    /// Protein QC — sequence, coding-region and mass spectrometry analyses.
+    ///
+    /// Three modes taking different inputs entirely, so the mode is chosen
+    /// explicitly rather than inferred from which flags were given.
+    Protein(ProteinArgs),
+}
+
+/// Arguments for the `protein` subcommand.
+#[derive(Parser, Debug)]
+pub struct ProteinArgs {
+    /// Which protein analysis to run.
+    #[command(subcommand)]
+    pub mode: ProteinMode,
+}
+
+/// The `protein` subcommand's modes.
+#[derive(Subcommand, Debug)]
+pub enum ProteinMode {
+    /// Protein FASTA QC: length statistics, composition and defects.
+    Sequence(ProteinSequenceArgs),
+}
+
+/// Arguments for `protein sequence`.
+#[derive(Parser, Debug)]
+#[command(
+    next_line_help = false,
+    term_width = 120,
+    help_template = "\
+{about-with-newline}
+{usage-heading} {usage}
+
+{all-args}"
+)]
+pub struct ProteinSequenceArgs {
+    /// Protein FASTA file(s), plain or .gz
+    #[arg(value_name = "FASTA", num_args = 1.., required = true, help_heading = "Input / Output")]
+    pub input: Vec<String>,
+
+    /// Output directory [default: .]
+    #[arg(
+        short,
+        long,
+        default_value = ".",
+        hide_default_value = true,
+        env = "RUSTQC_OUTDIR",
+        help_heading = "Input / Output"
+    )]
+    pub outdir: String,
+
+    /// Override sample name for output filenames (default: derived from filename)
+    #[arg(
+        long,
+        value_name = "NAME",
+        env = "RUSTQC_SAMPLE_NAME",
+        help_heading = "Input / Output"
+    )]
+    pub sample_name: Option<String>,
+
+    /// Write outputs to a flat directory (no subdirs)
+    #[arg(
+        long,
+        default_value_t = false,
+        env = "RUSTQC_FLAT_OUTPUT",
+        help_heading = "Input / Output"
+    )]
+    pub flat_output: bool,
+
+    /// YAML configuration file (see also: RUSTQC_CONFIG env var)
+    #[arg(short, long, value_name = "CONFIG", help_heading = "Input / Output")]
+    pub config: Option<String>,
+
+    /// JSON summary path (use "-" for stdout)
+    #[arg(short = 'j', long = "json-summary", value_name = "PATH", num_args = 0..=1, default_missing_value = "", env = "RUSTQC_JSON_SUMMARY", help_heading = "Input / Output")]
+    pub json_summary: Option<String>,
+
+    /// Ignore sequences shorter than this
+    #[arg(
+        long = "min-length",
+        value_name = "N",
+        default_value_t = 0,
+        hide_default_value = true,
+        env = "RUSTQC_MIN_LENGTH",
+        help_heading = "Tool parameters"
+    )]
+    pub min_length: usize,
+
+    /// Report a missing terminal stop codon as a defect
+    #[arg(
+        long = "expect-stop",
+        default_value_t = false,
+        env = "RUSTQC_EXPECT_STOP",
+        help_heading = "Tool parameters"
+    )]
+    pub expect_stop: bool,
+
+    /// Suppress output except warnings/errors
+    #[arg(
+        short = 'q',
+        long,
+        conflicts_with = "verbose",
+        env = "RUSTQC_QUIET",
+        help_heading = "General"
+    )]
+    pub quiet: bool,
+
+    /// Show additional detail
+    #[arg(
+        short = 'v',
+        long,
+        conflicts_with = "quiet",
+        env = "RUSTQC_VERBOSE",
+        help_heading = "General"
+    )]
+    pub verbose: bool,
 }
 
 /// Arguments for the `rna` subcommand.
@@ -935,5 +1050,57 @@ mod tests {
             result.is_err(),
             "--baits without --targets must be rejected"
         );
+    }
+
+    #[test]
+    fn test_protein_sequence_default_args() {
+        let cli = Cli::parse_from(["rustqc", "protein", "sequence", "proteome.fa"]);
+        match cli.command {
+            Commands::Protein(args) => match args.mode {
+                ProteinMode::Sequence(args) => {
+                    assert_eq!(args.input, vec!["proteome.fa"]);
+                    assert_eq!(args.outdir, ".");
+                    assert_eq!(args.min_length, 0);
+                    assert!(!args.expect_stop);
+                }
+            },
+            _ => panic!("Expected Protein subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_protein_requires_a_mode() {
+        let result = Cli::try_parse_from(["rustqc", "protein", "proteome.fa"]);
+        assert!(
+            result.is_err(),
+            "the mode is explicit, so a bare file argument must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_protein_sequence_multiple_inputs_and_flags() {
+        let cli = Cli::parse_from([
+            "rustqc",
+            "protein",
+            "sequence",
+            "a.fa",
+            "b.fa.gz",
+            "--min-length",
+            "50",
+            "--expect-stop",
+            "--outdir",
+            "/tmp/out",
+        ]);
+        match cli.command {
+            Commands::Protein(args) => match args.mode {
+                ProteinMode::Sequence(args) => {
+                    assert_eq!(args.input, vec!["a.fa", "b.fa.gz"]);
+                    assert_eq!(args.min_length, 50);
+                    assert!(args.expect_stop);
+                    assert_eq!(args.outdir, "/tmp/out");
+                }
+            },
+            _ => panic!("Expected Protein subcommand"),
+        }
     }
 }

@@ -77,6 +77,9 @@ fn main() -> Result<()> {
     let (quiet, verbose) = match &cli.command {
         cli::Commands::Rna(args) => (args.quiet, args.verbose),
         cli::Commands::Dna(args) => (args.quiet, args.verbose),
+        cli::Commands::Protein(args) => match &args.mode {
+            cli::ProteinMode::Sequence(args) => (args.quiet, args.verbose),
+        },
     };
     let verbosity = match (quiet, verbose) {
         (true, _) => Verbosity::Quiet,
@@ -100,7 +103,190 @@ fn main() -> Result<()> {
     match cli.command {
         cli::Commands::Rna(args) => run_rna(args, &ui),
         cli::Commands::Dna(args) => run_dna(args, &ui),
+        cli::Commands::Protein(args) => run_protein(args, &ui),
     }
+}
+
+/// Run the protein QC pipeline, dispatching on the chosen mode.
+fn run_protein(args: cli::ProteinArgs, ui: &Ui) -> Result<()> {
+    match args.mode {
+        cli::ProteinMode::Sequence(args) => run_protein_sequence(args, ui),
+    }
+}
+
+/// Run `protein sequence`: FASTA statistics, composition and defects.
+///
+/// Each input file is summarised on its own, and the seqkit-compatible table
+/// carries one row per file, which is how seqkit reports several files too.
+fn run_protein_sequence(args: cli::ProteinSequenceArgs, ui: &Ui) -> Result<()> {
+    use rustqc::protein::sequence::output;
+
+    let run_start = Instant::now();
+    let timestamp_start = format_utc_now();
+
+    let (merged, config_paths) = config::load_merged_config(args.config.as_deref())?;
+    let config = merged.protein;
+    let flat_output = args.flat_output || config.flat_output;
+    let expect_stop = args.expect_stop || config.sequence.expect_stop;
+    let min_length = if args.min_length > 0 {
+        args.min_length
+    } else {
+        config.sequence.min_length
+    };
+
+    let outdir = Path::new(&args.outdir);
+    std::fs::create_dir_all(outdir)
+        .with_context(|| format!("Failed to create output directory: {}", outdir.display()))?;
+
+    ui.header(
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHORT_HASH"),
+        env!("BUILD_TIMESTAMP"),
+        Some(&rustqc::cpu::cpu_info_line()),
+    );
+    for (path, source) in &config_paths {
+        ui.config("Config", &format!("{} ({source})", path.display()));
+    }
+    ui.config("Output dir", &args.outdir);
+    if min_length > 0 {
+        ui.config("Min length", &min_length.to_string());
+    }
+
+    let dir = if flat_output {
+        outdir.to_path_buf()
+    } else {
+        outdir.join("sequence")
+    };
+    std::fs::create_dir_all(&dir)?;
+
+    let mut table_rows = Vec::new();
+    let mut inputs = Vec::new();
+
+    for path in &args.input {
+        let file_start = Instant::now();
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str())
+            .to_string();
+
+        match summarise_fasta(path, min_length, expect_stop) {
+            Ok((stats, found, kept, skipped)) => {
+                if skipped > 0 {
+                    ui.detail(&format!(
+                        "{name}: skipped {skipped} sequences shorter than {min_length}"
+                    ));
+                }
+                let sample_name = args.sample_name.clone().unwrap_or_else(|| {
+                    Path::new(path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("sample")
+                        .to_string()
+                });
+
+                let report = dir.join(format!("{sample_name}.sequence_report.txt"));
+                output::write_report(&name, &stats, &found, &report)?;
+                ui.output_item("protein sequence", &report.display().to_string());
+
+                if !found.is_clean() {
+                    ui.warn(&format!(
+                        "{name}: {} defective sequences, see the report",
+                        found.count()
+                    ));
+                }
+
+                inputs.push(summary::InputSummary {
+                    bam_file: path.clone(),
+                    status: "success".to_string(),
+                    error: None,
+                    runtime_seconds: file_start.elapsed().as_secs_f64(),
+                    counting: None,
+                    dupradar: None,
+                    dna: None,
+                    outputs: vec![summary::OutputFile {
+                        tool: "protein sequence".to_string(),
+                        path: report.display().to_string(),
+                    }],
+                });
+                ui.detail(&format!("{name}: {kept} sequences"));
+                table_rows.push((name, stats));
+            }
+            Err(e) => {
+                ui.bam_result_err(&name, &format!("{e:#}"));
+                inputs.push(summary::InputSummary {
+                    bam_file: path.clone(),
+                    status: "failed".to_string(),
+                    error: Some(format!("{e:#}")),
+                    runtime_seconds: file_start.elapsed().as_secs_f64(),
+                    counting: None,
+                    dupradar: None,
+                    dna: None,
+                    outputs: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if !table_rows.is_empty() {
+        let stats_path = dir.join("sequence_stats.tsv");
+        output::write_seqkit_stats(&table_rows, &stats_path)?;
+        ui.output_item("protein sequence", &stats_path.display().to_string());
+    }
+
+    if let Some(ref json_path) = args.json_summary {
+        let summary = summary::RunSummary {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: env!("GIT_SHORT_HASH").to_string(),
+            binary_target: cpu::binary_target().to_string(),
+            cpu_features: cpu::detected_features()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            timestamp_start,
+            timestamp_end: format_utc_now(),
+            runtime_seconds: run_start.elapsed().as_secs_f64(),
+            inputs,
+        };
+        let json = serde_json::to_string_pretty(&summary)?;
+        if json_path == "-" {
+            println!("{json}");
+        } else {
+            let path = if json_path.is_empty() {
+                outdir.join("rustqc_summary.json")
+            } else {
+                PathBuf::from(json_path)
+            };
+            std::fs::write(&path, json)
+                .with_context(|| format!("Failed to write JSON summary: {}", path.display()))?;
+        }
+    }
+
+    ui.finish("Protein sequence QC", run_start.elapsed());
+    Ok(())
+}
+
+/// Read one FASTA and summarise it, returning the statistics, the defects, and
+/// how many sequences were kept and skipped by the length filter.
+fn summarise_fasta(
+    path: &str,
+    min_length: usize,
+    expect_stop: bool,
+) -> Result<(
+    rustqc::protein::sequence::stats::SequenceStats,
+    rustqc::protein::sequence::defects::Defects,
+    usize,
+    usize,
+)> {
+    use rustqc::protein::sequence::{self, defects, stats::SequenceStats};
+
+    let all = sequence::read_fasta(Path::new(path))?;
+    let total = all.len();
+    let kept: Vec<_> = all.into_iter().filter(|r| r.len() >= min_length).collect();
+    let skipped = total - kept.len();
+    let stats = SequenceStats::from_records(&kept);
+    let found = defects::inspect(&kept, expect_stop);
+    Ok((stats, found, kept.len(), skipped))
 }
 
 /// Run the DNA QC pipeline: depth of coverage, samtools-compatible outputs
