@@ -43,6 +43,11 @@ that muscle memory and existing wrapper scripts carry over:
 `--preseq-max-extrap`, `--preseq-step-size`, `--preseq-n-bootstraps`,
 `--preseq-seg-len`.
 
+One shared flag takes a different default: **`-Q/--mapq` defaults to 0 for
+`dna`**, not to 30 as it does for `rna`. That is mosdepth's `-Q` default, and
+matching it is a precondition for exact parity. Changing it silently would make
+every depth figure disagree with the reference tool.
+
 New flags:
 
 | Flag | Env | Default | Purpose |
@@ -227,23 +232,45 @@ median and MAD, and, in targeted mode, fold enrichment and fold-80 base penalty.
 
 ## 6. Test data and parity
 
-Reference data is a slice of a public high-coverage NA12878 alignment (1000
-Genomes) on chr20, together with the matching GRCh38 chr20 FASTA slice and a
-targets BED derived from an exome capture kit restricted to that interval.
+Reference data is a real public human alignment: the chr22 slice published in
+**nf-core/test-datasets** (`data/genomics/homo_sapiens/illumina/bam/test.paired_end.sorted.bam`,
+40001 bp, 5644 records), together with the matching `genome.fasta` and its
+index. The upstream BAM is not duplicate-marked, so the generation script marks
+duplicates locally with `samtools markdup`, yielding 1656 duplicate-flagged
+records.
 
-Decision on size: the slice is trimmed to roughly 200 kb so the committed
-fixtures stay under 10 MB in total. No git-lfs. If a metric turns out to need
-more reads to be meaningful (preseq extrapolation is the likely candidate), the
-interval is widened only as far as the 10 MB budget allows and the affected test
-is marked `#[ignore]` with an explanation rather than the budget being raised.
+This replaces the 1000 Genomes NA12878 chr20 slice originally planned here.
+`ftp.1000genomes.ebi.ac.uk` does not resolve from the build sandbox, whereas
+GitHub-hosted raw content does. The nf-core dataset is still a real public
+human alignment, it is idiomatic for this project, and at roughly 240 kB of
+inputs plus 140 kB of fixtures it sits far inside the size budget. A targets
+BED for the eventual `CollectHsMetrics` work is derived from the same slice
+when PR4 needs it.
 
-`tests/create_dna_test_data.sh` downloads, slices, duplicate-marks and indexes
-the inputs, converts the targets BED to a Picard `.interval_list`, and then runs
-every upstream tool to regenerate `tests/expected/dna/`. The script pins tool
-versions explicitly (mosdepth, samtools, Picard, Qualimap, preseq) and records
-them in a `tests/expected/dna/VERSIONS.txt` that the test suite asserts against,
-so a fixture regenerated with a different upstream version fails loudly instead
-of silently changing the baseline.
+Decision on size: committed fixtures stay under 10 MB in total. No git-lfs. If
+a metric turns out to need more reads to be meaningful (preseq extrapolation is
+the likely candidate), the dataset is widened only as far as the 10 MB budget
+allows and the affected test is marked `#[ignore]` with an explanation rather
+than the budget being raised.
+
+Two properties of this dataset shape the tests, and both were measured rather
+than assumed:
+
+- **Mate pairs overlap almost completely.** Correcting for that takes total
+  covered bases from 469875 to 247878, exactly the gap between
+  `mosdepth --fast-mode` and its default. The dataset therefore exercises
+  overlap correction hard, which is desirable: it is the single easiest thing
+  to get wrong in the depth engine.
+- **The MAPQ filter is not exercised.** `mosdepth -Q 30` returns the same
+  totals as the default on this data, so that code path is covered by unit
+  tests over synthetic records instead of by the fixtures.
+
+`tests/create_dna_test_data.sh` downloads, duplicate-marks and indexes the
+inputs, and then runs every upstream tool to regenerate `tests/expected/dna/`.
+The script pins tool versions explicitly and refuses to run against a different
+one, recording them in a `tests/expected/dna/VERSIONS.txt` that the test suite
+asserts against, so a fixture regenerated with a different upstream version
+fails loudly instead of silently changing the baseline.
 
 `tests/dna_integration_test.rs` compares RustQC output against those fixtures
 field by field: exact equality for integer fields and for text formatting,
