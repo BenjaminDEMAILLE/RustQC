@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Features
+
+- New `rustqc dna` subcommand for DNA (WGS) quality control: depth of coverage
+  with mosdepth-compatible outputs, samtools-compatible stats, flagstat and
+  idxstats, and preseq library complexity, all in a single pass over the
+  alignment with one worker per contig. Validated for exact parity against
+  mosdepth 0.3.14 and samtools 1.24.
+
 ### Changed
 
 - Internal: assay-agnostic analyses (BAM flag helpers, read-level statistics,

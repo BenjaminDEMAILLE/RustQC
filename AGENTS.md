@@ -74,6 +74,13 @@ src/
       stats.rs        — samtools stats full output (SN + all histogram sections)
       flagstat.rs     — samtools flagstat-compatible output
       idxstats.rs     — samtools idxstats-compatible output
+  dna/
+    mod.rs            — Re-exports the DNA submodules
+    depth.rs          — Per-contig depth accumulator (delta array, CIGAR walk,
+                        mate-overlap correction, prefix sum)
+    mosdepth/
+      mod.rs          — Per-contig summarisation feeding the mosdepth outputs
+      output.rs       — The six mosdepth-compatible writers (bgzf for the BED outputs)
   rna/
     mod.rs          — Re-exports the RNA submodules (dupradar, featurecounts, rseqc, qualimap)
                       and re-exports the shared ones from `common` for compatibility
@@ -120,9 +127,16 @@ Inter-module access uses `crate::` paths (e.g., `use crate::common::bam_stat_acc
 Assay-agnostic analyses belong in `common`; put new code under `rna` only if it
 needs a gene annotation or a library strand protocol.
 
-The CLI uses a single subcommand:
+The CLI has two subcommands:
 
 - `rustqc rna <BAM>... --gtf <GTF> [OPTIONS]`
+- `rustqc dna <BAM>... [OPTIONS]`
+
+The `dna` subcommand needs no annotation. It runs depth of coverage
+(mosdepth-compatible), the samtools-compatible outputs and preseq in one pass,
+with one worker per contig. Shared flags keep their `rna` names, short forms
+and `RUSTQC_*` environment variables, with one deliberate exception:
+`-Q/--mapq` defaults to 0 for `dna`, matching mosdepth, rather than 30.
 
 A GTF gene annotation file (`--gtf`) is required. This runs all analyses:
 dupRadar duplicate rate analysis, featureCounts-compatible gene counting,
