@@ -311,10 +311,14 @@ All branches are based on `main` and stacked in order.
    citations, and parity tests against mosdepth 0.3.14 and samtools 1.24. Every
    mosdepth output matches exactly; `samtools stats` matches on all 1889 data
    lines, its header differing by design.
-3. **`feat/dna-picard-core`** — `CollectWgsMetrics` and
-   `CollectInsertSizeMetrics`, their plots, and their parity fixtures.
-4. **`feat/dna-targeted`** — `--targets` / `--baits`, `CollectHsMetrics`,
-   `CollectGcBiasMetrics`, and targeted-mode parity fixtures.
+3. **`feat/dna-picard-core`** (delivered, PR #154) — `CollectWgsMetrics` and
+   `CollectInsertSizeMetrics`. Insert size matches Picard 3.4.0 byte for byte.
+   WGS matches on every column and all 251 histogram lines except
+   `HET_SNP_SENSITIVITY` and `HET_SNP_Q`, which come from a Monte Carlo
+   simulation and are written as `?`.
+4. **`feat/dna-targeted`** (not delivered) — `--targets` / `--baits`,
+   `CollectHsMetrics`, `CollectGcBiasMetrics`. See section 10 for how far the
+   groundwork got and what blocks each piece.
 5. **`feat/dna-qualimap-docs`** — Qualimap `bamqc` output and HTML report,
    `docs/src/content/docs/dna/*` pages, README, CHANGELOG and AGENTS.md updates.
 
@@ -352,5 +356,74 @@ The three points raised during design are resolved above: fixture size budget
   pipeline was validated against, while the DNA fixtures were generated with
   1.24. Bumping it would imply the RNA pipeline had been revalidated, which it
   has not, so the constant was left alone and the discrepancy flagged instead.
-- **`--targets` is accepted but inert** in PR2, warning that targeted metrics
-  are not implemented. It becomes real in PR4.
+- **`--targets` is accepted but inert**, warning that targeted metrics are not
+  implemented. Section 10 records why PR4 stalled.
+
+## 10. Findings on the two undelivered Picard collectors
+
+Work on PR4 stopped short of an implementation on purpose: both remaining
+collectors turned out to have rules that could not be pinned down against the
+fixture, and shipping an approximation labelled as parity would be worse than
+shipping nothing. What was established is recorded here so the next attempt
+does not start from zero.
+
+### CollectGcBiasMetrics
+
+**Solved: the window set.** GC is computed over sliding 100 bp windows, and
+the window set is `[i, i + 100)` for `i` from 1 to `len - 101` inclusive,
+which gives 39900 windows on the 40001 bp fixture. That is neither the obvious
+`0 ..= len - 100` (39902) nor a non-overlapping split (400). This rule was
+verified against all 101 `WINDOWS` counts of the fixture, exactly.
+
+**Solved: the derived columns.** With windows and read starts in hand,
+`NORMALIZED_COVERAGE` is `(read_starts_in_bin / windows_in_bin)` over
+`(total_read_starts / total_windows)`, and `ERROR_BAR_WIDTH` is
+`sqrt(read_starts_in_bin) / windows_in_bin` over that same global rate. Both
+reproduce the fixture's values.
+
+**Unsolved: which window a read is attributed to.** Binning reads by the
+window at their leftmost aligned position, or at their 5' end for
+reverse-strand reads, produces a distribution far from Picard's: bin 21 gets
+26 read starts where Picard reports 179. A scan over every index offset from
+-102 to +2, in both leftmost and 5'-end modes, found no assignment reproducing
+the fixture. The totals agree (5642 read starts either way), so it is a
+redistribution, not a filtering difference. Since the fixture's coverage is
+concentrated on a few positions, a wrong rule moves whole blocks of reads at
+once, which is consistent with what was seen.
+
+### CollectHsMetrics
+
+The tractable columns were checked and the arithmetic reconciles:
+`BAIT_TERRITORY` and `TARGET_TERRITORY` are the merged interval lengths
+(35000), `GENOME_SIZE` the reference length, `PF_UNIQUE_READS` is PF reads
+less duplicates (5642 - 1656 = 3986), `PF_BASES_ALIGNED` (670989) is the same
+denominator `CollectWgsMetrics` uses, `MEAN_TARGET_COVERAGE` is
+`ON_TARGET_BASES / TARGET_TERRITORY`, and `MEAN_BAIT_COVERAGE` is
+`PF_BASES_ALIGNED / BAIT_TERRITORY`.
+
+**The blocker is that HsMetrics does not filter the way WgsMetrics does.**
+Reusing the WgsMetrics exclusion model, without its coverage cap, gives
+`ON_TARGET_BASES` of 247070 against Picard's 245122, and every
+`PCT_TARGET_BASES_xX` is off in the fourth decimal. The two collectors report
+different base-quality and overlap exclusions on the same data
+(`PCT_EXC_BASEQ` 0.003982 against 0.007352, `PCT_EXC_OVERLAP` 0.330968
+against 0.324694), and the difference is not a reordering: the two exclusions
+sum differently as well (224745 against 222799 bases). Whatever HsMetrics does
+with overlapping mates and low-quality bases, it is a third rule, not either
+of the two already implemented.
+
+**Two further columns are out of reach regardless.** `AT_DROPOUT` and
+`GC_DROPOUT` are computed from the GC bias binning above, so they inherit its
+unsolved read-assignment rule. `HET_SNP_SENSITIVITY` and `HET_SNP_Q` are the
+same Monte Carlo simulation already marked `?` in `CollectWgsMetrics`, and
+`HS_PENALTY_*X` and `FOLD_80_BASE_PENALTY` are `-1` and `?` in the fixture
+because Picard itself could not compute them on this data.
+
+### Suggested next step
+
+Read the upstream Java for `GcBiasUtils.calculateAllGcs` and
+`HsMetricCollector`'s overlap clipping rather than continuing to infer from
+outputs. Both questions are a few lines of source away and neither yielded to
+black-box inference, which is exactly the case the specification's own advice
+covers: the semantics of each upstream tool belong in a table read off the
+source, not guessed from behaviour.
