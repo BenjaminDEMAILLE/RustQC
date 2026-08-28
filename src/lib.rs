@@ -71,6 +71,7 @@ use serde::Deserialize;
 pub mod common;
 pub mod config;
 pub mod cpu;
+pub mod dna;
 pub mod gtf;
 pub mod io;
 pub mod rna;
