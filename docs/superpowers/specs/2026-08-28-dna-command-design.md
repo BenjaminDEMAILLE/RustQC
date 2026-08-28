@@ -38,7 +38,7 @@ long name, the same short flag and the same `RUSTQC_*` environment variable, so
 that muscle memory and existing wrapper scripts carry over:
 
 `-o/--outdir`, `--sample-name`, `--flat-output`, `-c/--config`,
-`-j/--json-summary`, `-T/--threads`, `-Q/--mapq`, `-p/--paired`, `-q/--quiet`,
+`-j/--json-summary`, `-t/--threads`, `-Q/--mapq`, `-p/--paired`, `-q/--quiet`,
 `-v/--verbose`, `--skip-dup-check`, `--skip-preseq`, `--preseq-seed`,
 `--preseq-max-extrap`, `--preseq-step-size`, `--preseq-n-bootstraps`,
 `--preseq-seg-len`.
@@ -68,8 +68,9 @@ pipeline runs. CRAM input without `--reference` is a hard error, matching `rna`.
 
 `config::Config` gains a `dna: DnaConfig` field alongside the existing `rna`.
 `DnaConfig` mirrors `RnaConfig`: shared settings at the top level
-(`chromosome_prefix`, `chromosome_mapping`, `flat_output` semantics inherited from
-the top-level `Config`) and one nested struct per tool, each with an `enabled`
+(`chromosome_prefix`, `chromosome_mapping`, `flat_output`, each declared on
+`DnaConfig` itself, since `RnaConfig` declares its own rather than inheriting
+from the root `Config`) and one nested struct per tool, each with an `enabled`
 toggle and its tool-specific parameters:
 
 ```yaml
@@ -161,7 +162,7 @@ This is the memory profile of mosdepth itself: roughly 1 GB for GRCh38 chr1
 (248,956,422 bases at 4 bytes). With unbounded rayon parallelism that becomes
 `threads x 1 GB`, so contigs are scheduled longest-first and the number of
 concurrently live depth arrays is capped by `--max-depth-workers`, defaulting to
-`min(threads, available_ram / largest_contig_length * 4 bytes)` with a floor of
+`min(threads, available_ram / (largest_contig_length * 4 bytes))` with a floor of
 1. The cap applies only to the depth stage; read-level accumulators are cheap and
 stay fully parallel.
 
