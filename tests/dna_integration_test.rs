@@ -39,7 +39,7 @@ fn scratch(name: &str) -> PathBuf {
 /// as the fixtures were generated.
 fn compute() -> MosdepthResult {
     let bam_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/dna/test.dna.bam");
-    let mut reader = bam::Reader::from_path(&bam_path).unwrap();
+    let reader = bam::Reader::from_path(&bam_path).unwrap();
     let header = reader.header().to_owned();
 
     let mut contigs = Vec::new();
@@ -358,4 +358,56 @@ fn citations_name_the_dna_tools_only() {
         !citations.contains("dupRadar") && !citations.contains("RSeQC"),
         "a dna run must not cite the rna-only tools"
     );
+}
+
+/// The `.csi` companion indexes are not compared byte for byte: an index is
+/// binary metadata over the compressed blocks, and two writers answering the
+/// same queries need not produce the same bytes. What matters is that a region
+/// query returns the same rows through our index as through mosdepth's.
+///
+/// The query goes through the `tabix` binary rather than rust-htslib's tabix
+/// reader, which ends a fetched region by yielding a `TabixTruncatedRecord`
+/// instead of stopping, and does so at different points for the two files. The
+/// test is skipped where `tabix` is not installed, the same way the fixtures
+/// themselves depend on the upstream tools being present.
+#[test]
+fn csi_indexes_answer_region_queries_like_mosdepths() {
+    if std::process::Command::new("tabix")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: tabix is not installed");
+        return;
+    }
+
+    let query = |path: &Path| -> String {
+        let out = std::process::Command::new("tabix")
+            .arg(path)
+            .arg("chr22:2000-2500")
+            .output()
+            .unwrap_or_else(|e| panic!("querying {}: {e}", path.display()));
+        assert!(
+            out.status.success(),
+            "tabix failed on {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    for suffix in ["per-base.bed.gz", "regions.bed.gz", "thresholds.bed.gz"] {
+        let ours = produced("mosdepth", &format!("{SAMPLE}.{suffix}"));
+        let index = ours.with_file_name(format!("{SAMPLE}.{suffix}.csi"));
+        assert!(
+            index.exists(),
+            "{suffix} must have a .csi companion at {}",
+            index.display()
+        );
+
+        let mine = query(&ours);
+        let theirs = query(&fixture(&format!("test.{suffix}")));
+        assert!(!mine.is_empty(), "{suffix}: the query returned nothing");
+        assert_eq!(mine, theirs, "{suffix}: region query results differ");
+    }
 }

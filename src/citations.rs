@@ -64,6 +64,19 @@ const SAMTOOLS: Citation = Citation {
     doi: "10.1093/gigascience/giab008",
 };
 
+/// Same tool as [`SAMTOOLS`], different validated version.
+///
+/// The `rna` pipeline's outputs were checked against samtools 1.22.1 and the
+/// `dna` pipeline's against 1.24, so each cites the version it was actually
+/// compared with rather than both claiming the newer one.
+const SAMTOOLS_DNA: Citation = Citation {
+    heading: "Samtools (v1.24)",
+    description: "RustQC produces Samtools-compatible flagstat, idxstats, and stats output.",
+    reference: "Danecek P, Bonfield JK, Liddle J, et al. Twelve years of Samtools and BCFtools. *GigaScience*. 2021;10(2):giab008.",
+    url: "http://www.htslib.org/",
+    doi: "10.1093/gigascience/giab008",
+};
+
 const QUALIMAP: Citation = Citation {
     heading: "Qualimap (v2.3)",
     description: "RustQC produces gene body coverage output compatible with Qualimap rnaseq.",
@@ -133,7 +146,7 @@ pub fn write_dna_citations(
         write_citation(&mut w, &MOSDEPTH)?;
     }
     if config.samtools.enabled {
-        write_citation(&mut w, &SAMTOOLS)?;
+        write_citation(&mut w, &SAMTOOLS_DNA)?;
     }
     if config.preseq.enabled {
         write_citation(&mut w, &PRESEQ)?;

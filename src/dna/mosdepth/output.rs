@@ -10,7 +10,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rust_htslib::bgzf;
 
 use super::{dist_proportions, dist_rows, merge_histograms, MosdepthResult};
@@ -174,13 +174,49 @@ pub fn write_thresholds(result: &MosdepthResult, path: &Path) -> Result<()> {
     write_bgzf(path, &body)
 }
 
-/// Write `contents` to `path` as bgzf.
+/// Write `contents` to `path` as bgzf, then build its `.csi` index.
 fn write_bgzf(path: &Path, contents: &str) -> Result<()> {
-    let mut writer = bgzf::Writer::from_path(path)
-        .with_context(|| format!("Failed to create bgzf file: {}", path.display()))?;
-    writer
-        .write_all(contents.as_bytes())
-        .with_context(|| format!("Failed to write bgzf file: {}", path.display()))?;
+    {
+        let mut writer = bgzf::Writer::from_path(path)
+            .with_context(|| format!("Failed to create bgzf file: {}", path.display()))?;
+        writer
+            .write_all(contents.as_bytes())
+            .with_context(|| format!("Failed to write bgzf file: {}", path.display()))?;
+        // The writer must be dropped, and the bgzf stream closed, before the
+        // indexer reads the file back.
+    }
+    build_csi_index(path)
+}
+
+/// Build the `.csi` companion index for a bgzf-compressed BED file.
+///
+/// mosdepth writes one alongside each of its BED outputs, and `tabix` needs it
+/// to seek into them. CSI rather than TBI because CSI carries no 512 Mb
+/// coordinate ceiling, which matters on large contigs.
+fn build_csi_index(path: &Path) -> Result<()> {
+    use std::ffi::CString;
+
+    let path_c = CString::new(path.as_os_str().as_encoded_bytes()).with_context(|| {
+        format!(
+            "Path is not representable as a C string: {}",
+            path.display()
+        )
+    })?;
+
+    // SAFETY: `path_c` is a valid NUL-terminated string that outlives the
+    // call, `tbx_conf_bed` is a static provided by htslib, and the file was
+    // closed above. A min_shift of 14 selects CSI, matching what mosdepth and
+    // `tabix --csi` produce.
+    let ret = unsafe {
+        rust_htslib::htslib::tbx_index_build(
+            path_c.as_ptr(),
+            14,
+            &raw const rust_htslib::htslib::tbx_conf_bed,
+        )
+    };
+    if ret < 0 {
+        bail!("Failed to build the CSI index for {}", path.display());
+    }
     Ok(())
 }
 
@@ -285,5 +321,17 @@ mod tests {
             "depths 4 down to 0, all inside the dense range"
         );
         assert!(text.contains("total\t0\t1.00"));
+    }
+
+    #[test]
+    fn compressed_outputs_get_a_loadable_csi_index() {
+        let path = scratch("indexed.per-base.bed.gz");
+        let index = scratch("indexed.per-base.bed.gz.csi");
+        let _ = std::fs::remove_file(&index);
+        write_per_base(&result_with_windows(), &path).unwrap();
+        assert!(index.exists(), "the .csi companion index must be written");
+        // htslib refuses to open a malformed index, so opening it is the check.
+        let tbx = rust_htslib::tbx::Reader::from_path(&path);
+        assert!(tbx.is_ok(), "htslib could not open the indexed file");
     }
 }
