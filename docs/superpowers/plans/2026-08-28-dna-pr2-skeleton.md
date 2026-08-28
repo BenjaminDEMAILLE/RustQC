@@ -698,6 +698,30 @@ gunzip -c tests/expected/dna/test.thresholds.bed.gz | head -3
 
 Record, in the module doc comment, the exact column set, the separator, the numeric formatting (the summary's `6.20` is two decimals) and whether each file carries a header. The fixtures, not this plan, are the specification.
 
+Two formats were already reverse-engineered from the fixture and verified
+against every row, so Task 6 does not need to rediscover them.
+
+**`{prefix}.mosdepth.summary.txt`** has the header
+`chrom	length	bases	mean	min	max`, then one row per contig, then one
+`{contig}_region` row per contig when `--by` was given, then `total`, then
+`total_region`. `mean` is `bases / length` to two decimals.
+
+**`{prefix}.mosdepth.global.dist.txt`** and `.region.dist.txt` hold
+`chrom	depth	proportion` rows in descending depth order, where `proportion`
+is the fraction of that contig's bases at depth **at or above** `depth`,
+formatted `%.2f`, ending at depth 0 with `1.00`. The per-contig block is
+followed by the same table for `total`. Which depths get a row is the part
+worth writing down:
+
+- depths **0 through 300 always get a row**, even when no base sits at that
+  exact depth (301 is mosdepth's internal fixed depth-array size);
+- **above 300**, only depths where at least one base has exactly that depth;
+- the **maximum observed depth never gets a row**. On the fixture the maximum
+  is 867 and the first row is 866.
+
+That rule was checked against all 547 chr22 rows of the fixture, and the
+cumulative-proportion formula reproduces every value with no mismatch.
+
 - [ ] **Step 2: Write the failing unit tests**
 
 One test per writer: build a small hand-made depth vector, write to a scratch path under `std::env::temp_dir()`, assert the exact bytes. Include a test asserting `per-base.bed.gz` collapses runs of equal depth into one interval, since that is what keeps the file small.
