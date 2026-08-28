@@ -320,10 +320,10 @@ All branches are based on `main` and stacked in order.
    `CollectHsMetrics`, `CollectGcBiasMetrics`. Both GC bias files match Picard
    byte for byte; HS metrics matches on all 58 columns that do not derive from
    Picard's Monte Carlo theoretical sensitivity or its per-target GC dropout.
-5. **`feat/dna-qualimap-docs`** (partially delivered, PR #156) — the
+5. **`feat/dna-qualimap-docs`** (delivered, PR #156) — Qualimap `bamqc`, the
    `docs/src/content/docs/dna/*` pages, the `dna` CLI reference and the
-   CHANGELOG are done. Qualimap `bamqc` is not; section 11 records how far its
-   groundwork got.
+   CHANGELOG. `genome_results.txt` matches on every line but four and three raw
+   tables match byte for byte; section 11 records the residuals.
 
 Each PR is independently buildable, `cargo fmt --check` and
 `cargo clippy -- -D warnings` clean, and ships its own tests.
@@ -393,40 +393,63 @@ Two smaller rules came from the fixtures rather than the source: `GC_NC_x_y` is
 a window-weighted mean rather than a plain average over bins, and the GC tables
 carry two trailing blank lines where the other Picard tables carry one.
 
-## 11. Findings on Qualimap bamqc
+## 11. Qualimap bamqc: what matched and what did not
 
-Not implemented. The groundwork below is verified against Qualimap 2.3 output
-on the project fixture and should make a later attempt short.
+Delivered. `genome_results.txt` matches Qualimap 2.3 on every line but four,
+and the clipping profile, nucleotide content and mapping quality histogram
+match byte for byte.
 
-**Solved.** The window count is `ceil(len / ceil(len / 400))`, giving 397
-windows of 101 bases on the 40001 base fixture. Read and base counts all
-reproduce exactly: 5642 reads (secondary excluded and reported separately),
-5640 mapped, 1656 duplicate-flagged, 670989 sequenced bases (`M`, `=`, `X`) and
-670999 mapped bases (those plus `D`). The paired counts, the insert size mean,
-population standard deviation and median, the mean coverage
-(mapped bases over reference length, with no overlap correction, hence 16.77
-where mosdepth reports 6.20) and the `coverageData >= NX` table all match.
-The global mean mapping quality is the mean of the per-window means, where an
-uncovered window contributes zero, which is why it reads 2.4178 rather than
-about 60.
+### Rules recovered
 
-**Two fields still off.** Mismatches are `NM` less inserted bases only, not
-less inserted and deleted bases, which is the difference between 1340 and
-Qualimap's 1350. The ACTG content is counted in reference orientation, so
-reverse-strand reads are complemented before counting; counting them as
-sequenced puts A at 217220 against Qualimap's 233897 while the total and the N
-count still agree.
+- Windows: `ceil(len / ceil(len / 400))`, so 397 rather than 400.
+- Coverage counts every primary mapped record with no filtering, counts
+  deletions, and does not correct mate overlaps. That is why it reports 16.77
+  where mosdepth reports 6.20 and `CollectWgsMetrics` reports 3.53.
+- The global mean mapping quality is the mean of the per-window means with
+  uncovered windows contributing zero, hence 2.4178 rather than about 60. The
+  per-position histogram truncates that mean rather than rounding it.
+- Mismatches are `NM` less inserted bases only.
+- Base composition is counted in reference orientation while the clipped span
+  selecting which positions count is taken in sequencing orientation. Mixing
+  the two is Qualimap's own inconsistency and matching it is what took the
+  position-zero denominator from 5626 to its 5624.
+- The clipping profile is a distribution over the 863 clipped bases, not over
+  reads.
+- Tables are written with Java's `Double.toString` conventions, so an integral
+  value carries a trailing `.0`.
 
-**Two derived statistics differ in the fifth significant figure.** The mean of
-window mapping qualities comes out at 2.417942 against 2.4178, and the coverage
-standard deviation at 154.9340 against 154.9323. Both are consistent with
-Qualimap accumulating them per window, where the last partial window is handled
-differently, rather than with a wrong model.
+### Residuals, each documented in the code and the PR
 
-**Also out of scope.** Twelve raw data tables and the HTML report. The spec's
-original position still holds: parity should be asserted on `genome_results.txt`
-and the raw tables, with the HTML checked for structural presence only.
+- `mean mapping quality` and `std coverageData` differ in the fourth decimal;
+  393 of 397 windows match exactly and the four that do not differ by at most
+  0.053, consistent with Qualimap accumulating per window.
+- About five reference positions of 40001 sit one deeper here, showing up as 7
+  differing bins of roughly 590 in the coverage histogram and carrying into the
+  fractions derived from it, which still agree within 0.003 percentage points.
+- `genome_fraction_coverage` differs only in the last two digits of the double.
+- `homopolymer indels` differs outright: Qualimap classifies against a
+  reference context this does not reconstruct, and reports two polyC indels
+  that no read-derived rule produces because the deleted bases are not in the
+  read.
 
-**Why it was not shipped.** Everything above would have produced a file that
-presents itself as Qualimap-compatible while carrying wrong ACTG counts. That
-is worse than shipping nothing, so the findings are recorded instead.
+### Deliberately not written
+
+Qualimap's GC content distribution is computed over a 679-read subsample whose
+selection rule is undocumented, and its duplication rate histogram uses a
+definition that is not a read-start-position count. Emitting tables under those
+names with different numbers would be worse than leaving them out.
+
+## 12. Method note
+
+Three collectors in this stack resisted black-box inference from their outputs
+and gave way immediately to reading the upstream source: Picard's
+`GcBiasMetricsCollector` and `TargetMetricsCollector`, and htsjdk's
+`SAMUtils`. A first pass at PR4 was abandoned on the grounds that the rules
+could not be recovered; they were recovered within the hour once the Java was
+read instead of the behaviour.
+
+The general lesson, and it is the one this spec stated at the outset in section
+4: when a tool's output is the specification, its source is cheaper to read
+than its behaviour is to reverse-engineer. Qualimap is the counter-example that
+proves the rule, since it was recovered by inference alone, but only because
+each of its figures is a simple aggregate that could be tested in isolation.
