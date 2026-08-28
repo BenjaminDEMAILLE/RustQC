@@ -250,7 +250,9 @@ fn process_single_dna_bam(
     use rustqc::common::bam_stat_accum::BamStatAccum;
     use rustqc::common::preseq::PreseqAccum;
     use rustqc::dna::depth::{DepthAccum, MOSDEPTH_DEFAULT_EXCLUDE};
+    use rustqc::dna::insert_size::{self, InsertSizeAccum};
     use rustqc::dna::mosdepth::{output as mos_out, ContigDepth, MosdepthResult};
+    use rustqc::dna::wgs_metrics::{self, WgsAccum, WgsCounters, WgsMetricsResult};
 
     let sample_name = args
         .sample_name
@@ -301,8 +303,26 @@ fn process_single_dna_bam(
     let preseq_enabled = config.preseq.enabled;
     let seg_len = config.preseq.max_segment_length;
     let mapq_cut = args.mapq_cut;
+    // CollectWgsMetrics needs the reference to count non-N bases, so without
+    // one it is skipped rather than reported against a wrong territory.
+    let wgs_enabled = config.wgs_metrics.enabled && args.reference.is_some();
+    if config.wgs_metrics.enabled && args.reference.is_none() {
+        ui.warn("CollectWgsMetrics needs --reference to size the genome territory, skipping");
+    }
+    let insert_size_enabled = config.insert_size.enabled;
+    let wgs_min_mapq = config.wgs_metrics.min_mapping_quality;
+    let wgs_min_baseq = config.wgs_metrics.min_base_quality;
+    let coverage_cap = config.wgs_metrics.coverage_cap;
 
-    type ContigOutput = (ContigDepth, BamStatAccum, Option<PreseqAccum>);
+    /// What one contig worker hands back: its depth summary, the read-level
+    /// counters, and the optional per-tool accumulators.
+    type ContigOutput = (
+        ContigDepth,
+        BamStatAccum,
+        Option<PreseqAccum>,
+        Option<(WgsCounters, Vec<u32>)>,
+        Option<InsertSizeAccum>,
+    );
 
     let results: Vec<Result<ContigOutput>> = pool.install(|| {
         contigs
@@ -322,6 +342,11 @@ fn process_single_dna_bam(
                 let mut depth = DepthAccum::new(*len, mapq_cut, MOSDEPTH_DEFAULT_EXCLUDE);
                 let mut bam_stat = BamStatAccum::default();
                 let mut preseq = preseq_enabled.then(|| PreseqAccum::new(seg_len));
+                // Picard filters differently from mosdepth, so its coverage
+                // needs its own accumulator rather than a correction applied
+                // to a shared one.
+                let mut wgs = wgs_enabled.then(|| WgsAccum::new(*len, wgs_min_mapq, wgs_min_baseq));
+                let mut insert_sizes = insert_size_enabled.then(InsertSizeAccum::new);
 
                 let mut record = bam::Record::new();
                 while let Some(result) = reader.read(&mut record) {
@@ -331,11 +356,23 @@ fn process_single_dna_bam(
                     if let Some(accum) = preseq.as_mut() {
                         accum.process_read(&record);
                     }
+                    if let Some(accum) = wgs.as_mut() {
+                        accum.process_read(&record);
+                    }
+                    if let Some(accum) = insert_sizes.as_mut() {
+                        accum.process_read(&record);
+                    }
                 }
 
                 let depths = depth.into_depths();
                 let contig = ContigDepth::from_depths(name, &depths, window_size, &thresholds);
-                Ok((contig, bam_stat, preseq))
+                Ok((
+                    contig,
+                    bam_stat,
+                    preseq,
+                    wgs.map(|accum| accum.into_parts()),
+                    insert_sizes,
+                ))
             })
             .collect()
     });
@@ -343,13 +380,29 @@ fn process_single_dna_bam(
     let mut per_contig = Vec::new();
     let mut bam_stat_total = BamStatAccum::default();
     let mut preseq_total: Option<PreseqAccum> = None;
+    let mut wgs_counters = WgsCounters::default();
+    let mut wgs_depths: Vec<u32> = Vec::new();
+    let mut saw_wgs = false;
+    let mut insert_size_total: Option<InsertSizeAccum> = None;
     for result in results {
-        let (contig, bam_stat, preseq) = result?;
+        let (contig, bam_stat, preseq, wgs, insert_sizes) = result?;
         per_contig.push(contig);
         bam_stat_total.merge(bam_stat);
         match (preseq_total.as_mut(), preseq) {
             (Some(total), Some(part)) => total.merge(part),
             (None, part) => preseq_total = part,
+            _ => {}
+        }
+        if let Some((counters, depths)) = wgs {
+            saw_wgs = true;
+            wgs_counters.merge(&counters);
+            // Depths concatenate rather than merge: each worker owns a
+            // distinct contig and the metrics span all of them.
+            wgs_depths.extend(depths);
+        }
+        match (insert_size_total.as_mut(), insert_sizes) {
+            (Some(total), Some(part)) => total.merge(part),
+            (None, part) => insert_size_total = part,
             _ => {}
         }
     }
@@ -474,6 +527,33 @@ fn process_single_dna_bam(
         record_output("samtools idxstats", path);
     }
 
+    if saw_wgs {
+        let territory = match args.reference.as_deref() {
+            Some(reference) => genome_territory(reference)?,
+            // Unreachable: saw_wgs implies a reference was given.
+            None => wgs_depths.len() as u64,
+        };
+        let result = WgsMetricsResult::new(&wgs_depths, wgs_counters, territory, coverage_cap);
+        let dir_path = dir("picard").join("wgs_metrics");
+        std::fs::create_dir_all(&dir_path)?;
+        let path = dir_path.join(format!("{sample_name}.wgs_metrics.txt"));
+        wgs_metrics::write_wgs_metrics(&result, &path)?;
+        record_output("picard CollectWgsMetrics", path);
+    }
+
+    if let Some(accum) = insert_size_total {
+        let result = accum.into_result(config.insert_size.deviations);
+        if result.rows.is_empty() {
+            ui.warn("no paired records with a usable insert size, skipping insert size metrics");
+        } else {
+            let dir_path = dir("picard").join("insert_size");
+            std::fs::create_dir_all(&dir_path)?;
+            let path = dir_path.join(format!("{sample_name}.insert_size_metrics.txt"));
+            insert_size::write_insert_size_metrics(&result, &path)?;
+            record_output("picard CollectInsertSizeMetrics", path);
+        }
+    }
+
     if let Some(mut accum) = preseq_total {
         let preseq_dir = dir("preseq");
         std::fs::create_dir_all(&preseq_dir)?;
@@ -569,6 +649,27 @@ fn dna_summary(
         duplicates: bam_stat.duplicates,
         duplicate_pct,
     }
+}
+
+/// Count the reference's non-N bases, which is Picard's `GENOME_TERRITORY`.
+///
+/// The whole reference is read once. Picard does the same, and the figure
+/// cannot be taken from the alignment header, which records contig lengths
+/// including their N runs.
+fn genome_territory(reference: &str) -> Result<u64> {
+    use std::io::BufRead;
+
+    let reader = rustqc::io::open_reader(reference)
+        .with_context(|| format!("Failed to open reference FASTA: {reference}"))?;
+    let mut territory = 0u64;
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("Failed to read reference FASTA: {reference}"))?;
+        if line.starts_with('>') {
+            continue;
+        }
+        territory += line.bytes().filter(|b| !matches!(b, b'N' | b'n')).count() as u64;
+    }
+    Ok(territory)
 }
 
 /// How many contig depth arrays may be live at once.

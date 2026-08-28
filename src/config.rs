@@ -972,11 +972,83 @@ pub struct DnaConfig {
     #[serde(default)]
     pub samtools: SamtoolsConfig,
 
+    /// Picard CollectWgsMetrics configuration.
+    #[serde(default)]
+    pub wgs_metrics: WgsMetricsConfig,
+
+    /// Picard CollectInsertSizeMetrics configuration.
+    #[serde(default)]
+    pub insert_size: InsertSizeConfig,
+
     /// preseq lc_extrap library complexity extrapolation configuration.
     ///
     /// Reuses the same type as the `rna` pipeline; the implementation is shared.
     #[serde(default)]
     pub preseq: PreseqConfig,
+}
+
+/// Configuration for the Picard-compatible whole-genome coverage metrics.
+///
+/// Requires a reference FASTA: `GENOME_TERRITORY` counts the reference's
+/// non-N bases, so without one the analysis is skipped.
+///
+/// Example:
+/// ```yaml
+/// wgs_metrics:
+///   enabled: true
+///   coverage_cap: 250
+///   min_base_quality: 20
+///   min_mapping_quality: 20
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct WgsMetricsConfig {
+    /// Whether to compute whole-genome coverage metrics. Defaults to true.
+    pub enabled: bool,
+    /// Depth beyond this is reported as excluded rather than counted.
+    pub coverage_cap: u32,
+    /// Bases below this quality are excluded.
+    pub min_base_quality: u8,
+    /// Reads below this mapping quality are excluded.
+    pub min_mapping_quality: u8,
+}
+
+impl Default for WgsMetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            coverage_cap: 250,
+            min_base_quality: 20,
+            min_mapping_quality: 20,
+        }
+    }
+}
+
+/// Configuration for the Picard-compatible insert size metrics.
+///
+/// Example:
+/// ```yaml
+/// insert_size:
+///   enabled: true
+///   deviations: 10.0
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct InsertSizeConfig {
+    /// Whether to compute insert size metrics. Defaults to true.
+    pub enabled: bool,
+    /// Median absolute deviations either side of the median that survive
+    /// trimming before the mean and standard deviation are computed.
+    pub deviations: f64,
+}
+
+impl Default for InsertSizeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            deviations: 10.0,
+        }
+    }
 }
 
 /// Configuration for the mosdepth-compatible depth of coverage analysis.

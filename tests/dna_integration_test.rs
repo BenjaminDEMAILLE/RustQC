@@ -19,6 +19,7 @@ use rust_htslib::{bam, bgzf};
 use rustqc::dna::depth::{DepthAccum, MOSDEPTH_DEFAULT_EXCLUDE};
 use rustqc::dna::insert_size::{self, InsertSizeAccum};
 use rustqc::dna::mosdepth::{output, ContigDepth, MosdepthResult};
+use rustqc::dna::wgs_metrics::{self, WgsAccum, WgsMetricsResult};
 
 /// Window size and thresholds the fixtures were generated with.
 const WINDOW_SIZE: u32 = 500;
@@ -206,6 +207,8 @@ fn run_binary() -> &'static Path {
             .arg(&outdir)
             .arg("--window-size")
             .arg(WINDOW_SIZE.to_string())
+            .arg("--reference")
+            .arg(root.join("tests/data/dna/genome.fasta"))
             .arg("--quiet")
             .status()
             .expect("failed to run the rustqc binary");
@@ -467,5 +470,186 @@ fn insert_size_headline_figures_match_picard() {
         fr.widths,
         vec![9, 19, 27, 37, 47, 57, 69, 83, 103, 127, 181],
         "the eleven percentile widths"
+    );
+}
+
+// ===================================================================
+// Picard CollectWgsMetrics
+// ===================================================================
+
+fn wgs_result() -> WgsMetricsResult {
+    let bam_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/dna/test.dna.bam");
+    let mut reader = bam::Reader::from_path(&bam_path).unwrap();
+    let header = reader.header().to_owned();
+    let length = header.target_len(0).unwrap();
+
+    let mut accum = WgsAccum::new(
+        length,
+        wgs_metrics::DEFAULT_MIN_MAPPING_QUALITY,
+        wgs_metrics::DEFAULT_MIN_BASE_QUALITY,
+    );
+    let mut record = bam::Record::new();
+    while let Some(result) = reader.read(&mut record) {
+        result.unwrap();
+        accum.process_read(&record);
+    }
+    let (counters, depths) = accum.into_parts();
+    // The fixture reference carries no N bases, so the territory is its length.
+    WgsMetricsResult::new(&depths, counters, length, wgs_metrics::DEFAULT_COVERAGE_CAP)
+}
+
+/// The exclusion breakdown is the heart of this tool: it is what separates
+/// Picard's coverage from a plain depth count, and each fraction is a
+/// different rule. They are pinned individually so a failure names the rule
+/// that broke.
+#[test]
+fn wgs_exclusion_fractions_match_picard() {
+    let result = wgs_result();
+    assert_eq!(
+        result.counters.total_aligned_bases, 670_989,
+        "the denominator is every reference-aligned base of every primary mapped record"
+    );
+    let [dupe, mapq, unpaired, baseq, overlap, capped, total] = result.exclusion_fractions();
+    let close = |got: f64, want: f64, what: &str| {
+        assert!((got - want).abs() < 1e-6, "{what}: got {got}, want {want}");
+    };
+    close(dupe, 0.299737, "PCT_EXC_DUPE");
+    close(mapq, 0.0, "PCT_EXC_MAPQ");
+    close(unpaired, 0.0, "PCT_EXC_UNPAIRED");
+    close(baseq, 0.007352, "PCT_EXC_BASEQ");
+    close(overlap, 0.324694, "PCT_EXC_OVERLAP");
+    close(capped, 0.157699, "PCT_EXC_CAPPED");
+    close(total, 0.789481, "PCT_EXC_TOTAL");
+}
+
+#[test]
+fn wgs_headline_figures_match_picard() {
+    let result = wgs_result();
+    assert_eq!(result.genome_territory, 40_001);
+    assert_eq!(result.median_coverage, 0);
+    assert_eq!(result.mad_coverage, 0);
+    assert!(
+        (result.mean_coverage - 3.531312).abs() < 1e-6,
+        "mean was {}",
+        result.mean_coverage
+    );
+    assert!(
+        (result.sd_coverage - 27.339314).abs() < 1e-6,
+        "standard deviation was {}",
+        result.sd_coverage
+    );
+    let f = result.coverage_fractions();
+    assert!((f[0] - 0.029124).abs() < 1e-6, "PCT_1X was {}", f[0]);
+    assert!((f[13] - 0.01505).abs() < 1e-6, "PCT_100X was {}", f[13]);
+}
+
+/// The whole file, except the five columns RustQC does not compute.
+///
+/// `FOLD_80/90/95_BASE_PENALTY` are `?` in the fixture too, because Picard
+/// could not compute them on this data. `HET_SNP_SENSITIVITY` and `HET_SNP_Q`
+/// come from a Monte Carlo simulation that is out of scope, so RustQC writes
+/// `?` where Picard writes a sampled value. Those two positions are the only
+/// permitted difference.
+#[test]
+fn wgs_metrics_file_matches_picard_except_the_simulated_columns() {
+    let path = scratch("test.wgs_metrics.txt");
+    wgs_metrics::write_wgs_metrics(&wgs_result(), &path).unwrap();
+    let got = std::fs::read_to_string(&path).unwrap();
+    let want = std::fs::read_to_string(fixture("test.wgs_metrics.txt")).unwrap();
+
+    let got_lines: Vec<&str> = got.lines().collect();
+    let want_lines: Vec<&str> = want.lines().collect();
+    assert_eq!(
+        got_lines.len(),
+        want_lines.len(),
+        "line count differs: {} versus {}",
+        got_lines.len(),
+        want_lines.len()
+    );
+
+    for (i, (a, b)) in got_lines.iter().zip(want_lines.iter()).enumerate() {
+        if i == 2 {
+            // The metrics row: compare every column but the last two.
+            let ours: Vec<&str> = a.split('\t').collect();
+            let theirs: Vec<&str> = b.split('\t').collect();
+            assert_eq!(ours.len(), theirs.len(), "column count differs");
+            let simulated = ours.len() - 2;
+            for (col, (x, y)) in ours.iter().zip(theirs.iter()).enumerate() {
+                if col >= simulated {
+                    continue;
+                }
+                assert_eq!(x, y, "column {col} of the metrics row differs");
+            }
+            assert_eq!(
+                &ours[simulated..],
+                &["?", "?"],
+                "the simulated columns must be written as ?"
+            );
+        } else {
+            assert_eq!(a, b, "line {} differs", i + 1);
+        }
+    }
+}
+
+#[test]
+fn binary_writes_insert_size_metrics_byte_for_byte() {
+    let got = std::fs::read_to_string(produced(
+        "picard/insert_size",
+        &format!("{SAMPLE}.insert_size_metrics.txt"),
+    ))
+    .unwrap();
+    let want = std::fs::read_to_string(fixture("test.insert_size_metrics.txt")).unwrap();
+    assert_same_lines(&got, &want, "insert size metrics from the binary");
+}
+
+/// As with the library-level check, the two Monte Carlo columns are the only
+/// permitted difference.
+#[test]
+fn binary_writes_wgs_metrics_bar_the_simulated_columns() {
+    let got = std::fs::read_to_string(produced(
+        "picard/wgs_metrics",
+        &format!("{SAMPLE}.wgs_metrics.txt"),
+    ))
+    .unwrap();
+    let want = std::fs::read_to_string(fixture("test.wgs_metrics.txt")).unwrap();
+
+    let got_lines: Vec<&str> = got.lines().collect();
+    let want_lines: Vec<&str> = want.lines().collect();
+    assert_eq!(got_lines.len(), want_lines.len(), "line count differs");
+    for (i, (a, b)) in got_lines.iter().zip(want_lines.iter()).enumerate() {
+        if i == 2 {
+            let ours: Vec<&str> = a.split('\t').collect();
+            let theirs: Vec<&str> = b.split('\t').collect();
+            let simulated = ours.len() - 2;
+            assert_eq!(&ours[..simulated], &theirs[..simulated], "metrics row");
+        } else {
+            assert_eq!(a, b, "line {} differs", i + 1);
+        }
+    }
+}
+
+/// Without a reference there is no way to size the genome territory, so the
+/// analysis is skipped rather than reported against a wrong denominator.
+#[test]
+fn wgs_metrics_are_skipped_without_a_reference() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let outdir = std::env::temp_dir().join("rustqc-dna-noref");
+    let _ = std::fs::remove_dir_all(&outdir);
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_rustqc"))
+        .arg("dna")
+        .arg(root.join("tests/data/dna/test.dna.bam"))
+        .arg("--outdir")
+        .arg(&outdir)
+        .arg("--quiet")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        !outdir.join("picard/wgs_metrics").exists(),
+        "no reference means no WGS metrics"
+    );
+    assert!(
+        outdir.join("picard/insert_size").exists(),
+        "insert size needs no reference and must still be written"
     );
 }

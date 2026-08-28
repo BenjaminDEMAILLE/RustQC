@@ -7,3 +7,4 @@
 pub mod depth;
 pub mod insert_size;
 pub mod mosdepth;
+pub mod wgs_metrics;

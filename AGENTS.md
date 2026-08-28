@@ -78,6 +78,8 @@ src/
     mod.rs            — Re-exports the DNA submodules
     depth.rs          — Per-contig depth accumulator (delta array, CIGAR walk,
                         mate-overlap correction, prefix sum)
+    insert_size.rs    — Picard CollectInsertSizeMetrics reimplementation
+    wgs_metrics.rs    — Picard CollectWgsMetrics reimplementation
     mosdepth/
       mod.rs          — Per-contig summarisation feeding the mosdepth outputs
       output.rs       — The six mosdepth-compatible writers (bgzf for the BED outputs)
