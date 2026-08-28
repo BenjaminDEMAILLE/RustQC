@@ -163,7 +163,9 @@ fn run_dna(args: cli::DnaArgs, ui: &Ui) -> Result<()> {
     ui.config("Threads", &args.threads.to_string());
     if let Some(ref targets) = args.targets {
         ui.config("Targets", targets);
-        ui.warn("--targets is accepted but targeted metrics are not implemented yet");
+    }
+    if let Some(ref baits) = args.baits {
+        ui.config("Baits", baits);
     }
 
     let mut inputs = Vec::new();
@@ -250,7 +252,10 @@ fn process_single_dna_bam(
     use rustqc::common::bam_stat_accum::BamStatAccum;
     use rustqc::common::preseq::PreseqAccum;
     use rustqc::dna::depth::{DepthAccum, MOSDEPTH_DEFAULT_EXCLUDE};
+    use rustqc::dna::gc_bias::{self, GcBiasAccum};
+    use rustqc::dna::hs_metrics::{self, HsAccum, HsCounters, HsMetricsResult};
     use rustqc::dna::insert_size::{self, InsertSizeAccum};
+    use rustqc::dna::intervals::IntervalSet;
     use rustqc::dna::mosdepth::{output as mos_out, ContigDepth, MosdepthResult};
     use rustqc::dna::wgs_metrics::{self, WgsAccum, WgsCounters, WgsMetricsResult};
 
@@ -310,6 +315,26 @@ fn process_single_dna_bam(
         ui.warn("CollectWgsMetrics needs --reference to size the genome territory, skipping");
     }
     let insert_size_enabled = config.insert_size.enabled;
+    // GC bias bins reference windows, so it needs the reference just as the
+    // WGS metrics do.
+    let gc_bias_enabled = config.gc_bias.enabled && args.reference.is_some();
+    if config.gc_bias.enabled && args.reference.is_none() {
+        ui.warn("CollectGcBiasMetrics needs --reference to bin the genome, skipping");
+    }
+    let gc_window = config.gc_bias.window_size;
+
+    // Targeted mode is switched on by --targets alone; --baits defaults to it.
+    let targets = match args.targets.as_deref() {
+        Some(path) => Some(IntervalSet::from_bed(Path::new(path))?),
+        None => None,
+    };
+    let baits = match args.baits.as_deref() {
+        Some(path) => Some(IntervalSet::from_bed(Path::new(path))?),
+        None => targets.clone(),
+    };
+    let hs_enabled = config.hs_metrics.enabled && targets.is_some();
+    let hs_min_mapq = config.hs_metrics.min_mapping_quality;
+    let hs_min_baseq = config.hs_metrics.min_base_quality;
     let wgs_min_mapq = config.wgs_metrics.min_mapping_quality;
     let wgs_min_baseq = config.wgs_metrics.min_base_quality;
     let coverage_cap = config.wgs_metrics.coverage_cap;
@@ -322,6 +347,8 @@ fn process_single_dna_bam(
         Option<PreseqAccum>,
         Option<(WgsCounters, Vec<u32>)>,
         Option<InsertSizeAccum>,
+        Option<GcBiasAccum>,
+        Option<(HsCounters, Vec<u32>, Vec<bool>, String)>,
     );
 
     let results: Vec<Result<ContigOutput>> = pool.install(|| {
@@ -348,6 +375,37 @@ fn process_single_dna_bam(
                 let mut wgs = wgs_enabled.then(|| WgsAccum::new(*len, wgs_min_mapq, wgs_min_baseq));
                 let mut insert_sizes = insert_size_enabled.then(InsertSizeAccum::new);
 
+                // GC bias and the targeted metrics both need per-contig
+                // context, fetched once here rather than per record.
+                let reference_bases: Option<Vec<u8>> = if gc_bias_enabled {
+                    let reader = rust_htslib::faidx::Reader::from_path(
+                        args.reference.as_deref().unwrap_or_default(),
+                    )
+                    .with_context(|| "Failed to open the reference FASTA index")?;
+                    let length = reader.fetch_seq_len(name) as usize;
+                    Some(
+                        reader
+                            .fetch_seq(name, 0, length.saturating_sub(1))
+                            .map(|s| s.to_vec())
+                            .with_context(|| format!("Failed to read reference for {name}"))?,
+                    )
+                } else {
+                    None
+                };
+                let mut gc = reference_bases
+                    .as_ref()
+                    .map(|bases| GcBiasAccum::new(bases, gc_window));
+                let mut hs = hs_enabled.then(|| {
+                    HsAccum::new(
+                        name,
+                        *len,
+                        baits.as_ref().unwrap_or_else(|| targets.as_ref().unwrap()),
+                        targets.as_ref().unwrap(),
+                        hs_min_mapq,
+                        hs_min_baseq,
+                    )
+                });
+
                 let mut record = bam::Record::new();
                 while let Some(result) = reader.read(&mut record) {
                     result.context("Failed to read record")?;
@@ -362,6 +420,12 @@ fn process_single_dna_bam(
                     if let Some(accum) = insert_sizes.as_mut() {
                         accum.process_read(&record);
                     }
+                    if let (Some(accum), Some(bases)) = (gc.as_mut(), reference_bases.as_ref()) {
+                        accum.process_read(&record, bases);
+                    }
+                    if let Some(accum) = hs.as_mut() {
+                        accum.process_read(&record);
+                    }
                 }
 
                 let depths = depth.into_depths();
@@ -372,6 +436,11 @@ fn process_single_dna_bam(
                     preseq,
                     wgs.map(|accum| accum.into_parts()),
                     insert_sizes,
+                    gc,
+                    hs.map(|accum| {
+                        let (counters, depths, mask) = accum.into_parts();
+                        (counters, depths, mask, name.clone())
+                    }),
                 ))
             })
             .collect()
@@ -384,8 +453,13 @@ fn process_single_dna_bam(
     let mut wgs_depths: Vec<u32> = Vec::new();
     let mut saw_wgs = false;
     let mut insert_size_total: Option<InsertSizeAccum> = None;
+    let mut gc_total: Option<GcBiasAccum> = None;
+    let mut hs_counters = HsCounters::default();
+    let mut hs_target_depths: Vec<u32> = Vec::new();
+    let mut hs_target_count = 0u64;
+    let mut hs_zero_targets = 0u64;
     for result in results {
-        let (contig, bam_stat, preseq, wgs, insert_sizes) = result?;
+        let (contig, bam_stat, preseq, wgs, insert_sizes, gc, hs) = result?;
         per_contig.push(contig);
         bam_stat_total.merge(bam_stat);
         match (preseq_total.as_mut(), preseq) {
@@ -405,6 +479,29 @@ fn process_single_dna_bam(
             (None, part) => insert_size_total = part,
             _ => {}
         }
+        match (gc_total.as_mut(), gc) {
+            (Some(total), Some(part)) => total.merge(&part),
+            (None, part) => gc_total = part,
+            _ => {}
+        }
+        if let Some((counters, depths, mask, contig_name)) = hs {
+            hs_counters.merge(&counters);
+            for (depth, on_target) in depths.iter().zip(mask.iter()) {
+                if *on_target {
+                    hs_target_depths.push(*depth);
+                }
+            }
+            if let Some(set) = targets.as_ref() {
+                for interval in set.on(&contig_name) {
+                    hs_target_count += 1;
+                    if (interval.start..interval.end)
+                        .all(|p| depths.get(p as usize).copied().unwrap_or(0) == 0)
+                    {
+                        hs_zero_targets += 1;
+                    }
+                }
+            }
+        }
     }
 
     // Unmapped records carry no contig, so they need their own pass; flagstat
@@ -416,10 +513,41 @@ fn process_single_dna_bam(
             reader.set_reference(reference).ok();
         }
         if reader.fetch(bam::FetchDefinition::Unmapped).is_ok() {
+            // Unmapped records reach no contig worker, yet they still count
+            // towards several metrics: flagstat and idxstats report them, HS
+            // metrics count them in TOTAL_READS and PF_BASES, and GC bias
+            // counts them as clusters. Both accumulators short-circuit on an
+            // unmapped record, so an empty contig is enough context here.
+            let mut hs_unmapped = hs_enabled.then(|| {
+                HsAccum::new(
+                    "",
+                    0,
+                    baits.as_ref().unwrap_or_else(|| targets.as_ref().unwrap()),
+                    targets.as_ref().unwrap(),
+                    hs_min_mapq,
+                    hs_min_baseq,
+                )
+            });
+            let mut gc_unmapped = gc_bias_enabled.then(|| GcBiasAccum::new(&[], gc_window));
+
             let mut record = bam::Record::new();
             while let Some(result) = reader.read(&mut record) {
                 result.context("Failed to read unmapped record")?;
                 bam_stat_total.process_read(&record, mapq_cut);
+                if let Some(accum) = hs_unmapped.as_mut() {
+                    accum.process_read(&record);
+                }
+                if let Some(accum) = gc_unmapped.as_mut() {
+                    accum.process_read(&record, &[]);
+                }
+            }
+
+            if let Some(accum) = hs_unmapped {
+                let (counters, _, _) = accum.into_parts();
+                hs_counters.merge(&counters);
+            }
+            if let (Some(total), Some(part)) = (gc_total.as_mut(), gc_unmapped) {
+                total.merge(&part);
             }
         }
     }
@@ -552,6 +680,43 @@ fn process_single_dna_bam(
             insert_size::write_insert_size_metrics(&result, &path)?;
             record_output("picard CollectInsertSizeMetrics", path);
         }
+    }
+
+    if let Some(accum) = gc_total {
+        let result = accum.into_result(gc_window);
+        let dir_path = dir("picard").join("gc_bias");
+        std::fs::create_dir_all(&dir_path)?;
+        let detail = dir_path.join(format!("{sample_name}.gc_bias.detail_metrics.txt"));
+        gc_bias::write_detail_metrics(&result, &detail)?;
+        record_output("picard CollectGcBiasMetrics", detail);
+        let summary = dir_path.join(format!("{sample_name}.gc_bias.summary_metrics.txt"));
+        gc_bias::write_summary_metrics(&result, &summary)?;
+        record_output("picard CollectGcBiasMetrics", summary);
+    }
+
+    if hs_enabled {
+        let target_set = targets.as_ref().expect("hs_enabled implies --targets");
+        let bait_set = baits.as_ref().unwrap_or(target_set);
+        let library_size = hs_metrics::estimate_library_size(
+            hs_counters.selected_pairs,
+            hs_counters.selected_unique_pairs,
+        );
+        let result = HsMetricsResult {
+            bait_set: bait_set.name().to_string(),
+            bait_territory: bait_set.territory(),
+            target_territory: target_set.territory(),
+            genome_size: contigs.iter().map(|(_, _, len)| len).sum(),
+            counters: hs_counters,
+            target_depths: hs_target_depths,
+            zero_coverage_targets: hs_zero_targets,
+            target_count: hs_target_count,
+            library_size,
+        };
+        let dir_path = dir("picard").join("hs_metrics");
+        std::fs::create_dir_all(&dir_path)?;
+        let path = dir_path.join(format!("{sample_name}.hs_metrics.txt"));
+        hs_metrics::write_hs_metrics(&result, &path)?;
+        record_output("picard CollectHsMetrics", path);
     }
 
     if let Some(mut accum) = preseq_total {

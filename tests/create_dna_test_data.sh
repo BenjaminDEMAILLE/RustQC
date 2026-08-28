@@ -42,6 +42,7 @@ trap 'rm -rf "$tmp"' EXIT
 curl -sSfL -o "$tmp/upstream.bam"      "$base/illumina/bam/test.paired_end.sorted.bam"
 curl -sSfL -o "$data/genome.fasta"     "$base/genome/genome.fasta"
 curl -sSfL -o "$data/genome.fasta.fai" "$base/genome/genome.fasta.fai"
+curl -sSfL -o "$data/targets.bed"      "$base/genome/genome.multi_intervals.bed"
 
 # Mark duplicates: name-sort, add mate tags, coordinate-sort, then markdup.
 samtools sort -n -o "$tmp/ns.bam" "$tmp/upstream.bam"
@@ -75,6 +76,22 @@ picard CollectInsertSizeMetrics \
 
 # The chart output needs R, so it goes to the scratch directory and is not
 # compared against; only the two metrics tables are fixtures.
+# Picard consumes interval lists rather than BED, so the targets are converted
+# with Picard's own tool. The two conventions differ: BED is zero-based
+# half-open, an interval list one-based inclusive.
+picard CreateSequenceDictionary -R "$data/genome.fasta" -O "$tmp/genome.dict"
+picard BedToIntervalList \
+  -I "$data/targets.bed" \
+  -O "$tmp/targets.interval_list" \
+  -SD "$tmp/genome.dict"
+
+picard CollectHsMetrics \
+  -I "$data/test.dna.bam" \
+  -O "$expected/test.hs_metrics.txt" \
+  -R "$data/genome.fasta" \
+  -BI "$tmp/targets.interval_list" \
+  -TI "$tmp/targets.interval_list"
+
 picard CollectGcBiasMetrics \
   -I "$data/test.dna.bam" \
   -O "$expected/test.gc_bias.detail_metrics.txt" \
@@ -88,7 +105,8 @@ picard CollectGcBiasMetrics \
 # "## METRICS CLASS" and "## HISTOGRAM" markers further down are part of the
 # format and are kept.
 for f in "$expected/test.wgs_metrics.txt" "$expected/test.insert_size_metrics.txt" \
-         "$expected/test.gc_bias.detail_metrics.txt" "$expected/test.gc_bias.summary_metrics.txt"; do
+         "$expected/test.gc_bias.detail_metrics.txt" "$expected/test.gc_bias.summary_metrics.txt" \
+         "$expected/test.hs_metrics.txt"; do
   sed -e '/^## htsjdk\.samtools\.metrics\.StringHeader$/d' -e '/^# /d' "$f" \
     | sed -e '/./,$!d' > "$f.tmp" && mv "$f.tmp" "$f"
 done

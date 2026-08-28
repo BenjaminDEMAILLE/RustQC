@@ -980,6 +980,14 @@ pub struct DnaConfig {
     #[serde(default)]
     pub insert_size: InsertSizeConfig,
 
+    /// Picard CollectGcBiasMetrics configuration.
+    #[serde(default)]
+    pub gc_bias: GcBiasConfig,
+
+    /// Picard CollectHsMetrics configuration, used in targeted mode.
+    #[serde(default)]
+    pub hs_metrics: HsMetricsConfig,
+
     /// preseq lc_extrap library complexity extrapolation configuration.
     ///
     /// Reuses the same type as the `rna` pipeline; the implementation is shared.
@@ -1018,6 +1026,66 @@ impl Default for WgsMetricsConfig {
         Self {
             enabled: true,
             coverage_cap: 250,
+            min_base_quality: 20,
+            min_mapping_quality: 20,
+        }
+    }
+}
+
+/// Configuration for the Picard-compatible GC bias metrics.
+///
+/// Requires a reference FASTA: the analysis bins reference windows by GC.
+///
+/// Example:
+/// ```yaml
+/// gc_bias:
+///   enabled: true
+///   window_size: 100
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct GcBiasConfig {
+    /// Whether to compute GC bias metrics. Defaults to true.
+    pub enabled: bool,
+    /// Width of the sliding reference windows GC is computed over.
+    pub window_size: usize,
+}
+
+impl Default for GcBiasConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_size: 100,
+        }
+    }
+}
+
+/// Configuration for the Picard-compatible targeted sequencing metrics.
+///
+/// Only takes effect when `--targets` is given.
+///
+/// Example:
+/// ```yaml
+/// hs_metrics:
+///   enabled: true
+///   min_base_quality: 20
+///   min_mapping_quality: 20
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct HsMetricsConfig {
+    /// Whether to compute targeted metrics. Defaults to true.
+    pub enabled: bool,
+    /// Bases below this quality are excluded.
+    pub min_base_quality: u8,
+    /// Reads below this mapping quality are excluded.
+    pub min_mapping_quality: u8,
+}
+
+impl Default for HsMetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
             min_base_quality: 20,
             min_mapping_quality: 20,
         }

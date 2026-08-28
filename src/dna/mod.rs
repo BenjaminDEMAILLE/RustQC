@@ -6,6 +6,8 @@
 
 pub mod depth;
 pub mod gc_bias;
+pub mod hs_metrics;
 pub mod insert_size;
+pub mod intervals;
 pub mod mosdepth;
 pub mod wgs_metrics;

@@ -18,7 +18,9 @@ use rust_htslib::{bam, bgzf};
 
 use rustqc::dna::depth::{DepthAccum, MOSDEPTH_DEFAULT_EXCLUDE};
 use rustqc::dna::gc_bias::{self, GcBiasAccum};
+use rustqc::dna::hs_metrics::{self, HsAccum, HsCounters, HsMetricsResult};
 use rustqc::dna::insert_size::{self, InsertSizeAccum};
+use rustqc::dna::intervals::IntervalSet;
 use rustqc::dna::mosdepth::{output, ContigDepth, MosdepthResult};
 use rustqc::dna::wgs_metrics::{self, WgsAccum, WgsMetricsResult};
 
@@ -718,5 +720,269 @@ fn gc_bias_summary_metrics_match_picard() {
         &std::fs::read_to_string(&path).unwrap(),
         &std::fs::read_to_string(fixture("test.gc_bias.summary_metrics.txt")).unwrap(),
         "GC bias summary metrics",
+    );
+}
+
+// ===================================================================
+// Picard CollectHsMetrics
+// ===================================================================
+
+/// Read one column out of the fixture's single metrics row.
+fn hs_fixture_column(name: &str) -> String {
+    let text = std::fs::read_to_string(fixture("test.hs_metrics.txt")).unwrap();
+    let mut lines = text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty());
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let values: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let index = header
+        .iter()
+        .position(|h| *h == name)
+        .unwrap_or_else(|| panic!("no column named {name}"));
+    values[index].to_string()
+}
+
+fn hs_result() -> HsMetricsResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let targets = IntervalSet::from_bed(&root.join("tests/data/dna/targets.bed")).unwrap();
+
+    let mut reader = bam::Reader::from_path(root.join("tests/data/dna/test.dna.bam")).unwrap();
+    let header = reader.header().to_owned();
+    let contig = String::from_utf8(header.tid2name(0).to_vec()).unwrap();
+    let length = header.target_len(0).unwrap();
+
+    let mut accum = HsAccum::new(&contig, length, &targets, &targets, 20, 20);
+    let mut record = bam::Record::new();
+    while let Some(result) = reader.read(&mut record) {
+        result.unwrap();
+        accum.process_read(&record);
+    }
+    let (counters, depths, target_mask) = accum.into_parts();
+
+    let target_depths: Vec<u32> = depths
+        .iter()
+        .zip(target_mask.iter())
+        .filter(|(_, on_target)| **on_target)
+        .map(|(depth, _)| *depth)
+        .collect();
+
+    let zero_coverage_targets = targets
+        .on(&contig)
+        .iter()
+        .filter(|interval| (interval.start..interval.end).all(|p| depths[p as usize] == 0))
+        .count() as u64;
+
+    let library_size =
+        hs_metrics::estimate_library_size(counters.selected_pairs, counters.selected_unique_pairs);
+
+    HsMetricsResult {
+        bait_set: targets.name().to_string(),
+        bait_territory: targets.territory(),
+        target_territory: targets.territory(),
+        genome_size: length,
+        counters,
+        target_depths,
+        zero_coverage_targets,
+        target_count: targets.len() as u64,
+        library_size,
+    }
+}
+
+/// The counters are the part that had to be taken from Picard's source, so
+/// each is pinned against the fixture individually.
+#[test]
+fn hs_counters_match_picard() {
+    let result = hs_result();
+    let c: &HsCounters = &result.counters;
+    let want = |name: &str| -> u64 { hs_fixture_column(name).parse().unwrap() };
+
+    assert_eq!(result.bait_territory, want("BAIT_TERRITORY"));
+    assert_eq!(result.target_territory, want("TARGET_TERRITORY"));
+    assert_eq!(result.genome_size, want("GENOME_SIZE"));
+    assert_eq!(c.total_reads, want("TOTAL_READS"), "secondary excluded");
+    assert_eq!(c.pf_bases, want("PF_BASES"));
+    assert_eq!(c.pf_unique_reads, want("PF_UNIQUE_READS"));
+    assert_eq!(c.pf_uq_reads_aligned, want("PF_UQ_READS_ALIGNED"));
+    assert_eq!(c.pf_bases_aligned, want("PF_BASES_ALIGNED"));
+    assert_eq!(c.pf_uq_bases_aligned, want("PF_UQ_BASES_ALIGNED"));
+    assert_eq!(c.on_bait_bases, want("ON_BAIT_BASES"));
+    assert_eq!(c.near_bait_bases, want("NEAR_BAIT_BASES"));
+    assert_eq!(c.off_bait_bases, want("OFF_BAIT_BASES"));
+    assert_eq!(
+        c.on_target_bases,
+        want("ON_TARGET_BASES"),
+        "overlap clipping runs before the base quality filter"
+    );
+    assert_eq!(result.library_size, Some(want("HS_LIBRARY_SIZE")));
+}
+
+/// The exclusion fractions are where HsMetrics parts company with
+/// CollectWgsMetrics, so they get their own assertions.
+#[test]
+fn hs_exclusion_fractions_match_picard() {
+    let result = hs_result();
+    let aligned = result.counters.pf_bases_aligned as f64;
+    let want = |name: &str| -> f64 { hs_fixture_column(name).parse().unwrap() };
+    let close = |got: f64, name: &str| {
+        let expected = want(name);
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "{name}: got {got}, want {expected}"
+        );
+    };
+    close(
+        result.counters.excluded_dupe as f64 / aligned,
+        "PCT_EXC_DUPE",
+    );
+    close(
+        result.counters.excluded_overlap as f64 / aligned,
+        "PCT_EXC_OVERLAP",
+    );
+    close(
+        result.counters.excluded_baseq as f64 / aligned,
+        "PCT_EXC_BASEQ",
+    );
+    close(
+        result.counters.excluded_off_target as f64 / aligned,
+        "PCT_EXC_OFF_TARGET",
+    );
+}
+
+#[test]
+fn hs_target_coverage_matches_picard() {
+    let result = hs_result();
+    let want = |name: &str| -> f64 { hs_fixture_column(name).parse().unwrap() };
+    assert!(
+        (result.mean_target_coverage() - want("MEAN_TARGET_COVERAGE")).abs() < 1e-6,
+        "mean target coverage was {}",
+        result.mean_target_coverage()
+    );
+    assert!(
+        (result.mean_bait_coverage() - want("MEAN_BAIT_COVERAGE")).abs() < 1e-6,
+        "mean bait coverage was {}",
+        result.mean_bait_coverage()
+    );
+    let (median, min, max) = result.target_coverage_bounds();
+    assert_eq!(u64::from(median), want("MEDIAN_TARGET_COVERAGE") as u64);
+    assert_eq!(u64::from(min), want("MIN_TARGET_COVERAGE") as u64);
+    assert_eq!(u64::from(max), want("MAX_TARGET_COVERAGE") as u64);
+
+    let fractions = result.target_coverage_fractions();
+    for (level, got) in hs_metrics::TARGET_COVERAGE_LEVELS.iter().zip(fractions) {
+        let expected = want(&format!("PCT_TARGET_BASES_{level}X"));
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "PCT_TARGET_BASES_{level}X: got {got}, want {expected}"
+        );
+    }
+}
+
+/// A second binary run, this time in targeted mode with a reference, so the
+/// GC bias and targeted outputs are produced.
+fn run_binary_targeted() -> &'static Path {
+    static OUTDIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    OUTDIR.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let outdir = std::env::temp_dir().join("rustqc-dna-targeted");
+        let _ = std::fs::remove_dir_all(&outdir);
+        std::fs::create_dir_all(&outdir).unwrap();
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_rustqc"))
+            .arg("dna")
+            .arg(root.join("tests/data/dna/test.dna.bam"))
+            .arg("--reference")
+            .arg(root.join("tests/data/dna/genome.fasta"))
+            .arg("--targets")
+            .arg(root.join("tests/data/dna/targets.bed"))
+            .arg("--outdir")
+            .arg(&outdir)
+            .arg("--quiet")
+            .status()
+            .expect("failed to run the rustqc binary");
+        assert!(status.success(), "rustqc dna exited with {status}");
+        outdir
+    })
+}
+
+#[test]
+fn binary_writes_gc_bias_metrics_byte_for_byte() {
+    for suffix in ["gc_bias.detail_metrics", "gc_bias.summary_metrics"] {
+        let got = std::fs::read_to_string(
+            run_binary_targeted()
+                .join("picard/gc_bias")
+                .join(format!("{SAMPLE}.{suffix}.txt")),
+        )
+        .unwrap();
+        let want = std::fs::read_to_string(fixture(&format!("test.{suffix}.txt"))).unwrap();
+        assert_same_lines(&got, &want, suffix);
+    }
+}
+
+/// Every HS metrics column but the seven that need Picard's theoretical
+/// sensitivity simulation or its per-target GC dropout, which RustQC does not
+/// compute and writes as Picard writes its own uncomputable values.
+#[test]
+fn binary_writes_hs_metrics_bar_the_simulated_columns() {
+    let path = run_binary_targeted()
+        .join("picard/hs_metrics")
+        .join(format!("{SAMPLE}.hs_metrics.txt"));
+    let parse = |text: &str| -> std::collections::HashMap<String, String> {
+        let mut lines = text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let values: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        header
+            .iter()
+            .zip(values.iter())
+            .map(|(h, v)| (h.to_string(), v.to_string()))
+            .collect()
+    };
+
+    let ours = parse(&std::fs::read_to_string(&path).unwrap());
+    let theirs = parse(&std::fs::read_to_string(fixture("test.hs_metrics.txt")).unwrap());
+
+    let uncomputed: Vec<String> = [
+        "HET_SNP_SENSITIVITY",
+        "HET_SNP_Q",
+        "AT_DROPOUT",
+        "GC_DROPOUT",
+        "FOLD_80_BASE_PENALTY",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain(
+        hs_metrics::PENALTY_LEVELS
+            .iter()
+            .map(|n| format!("HS_PENALTY_{n}X")),
+    )
+    .collect();
+
+    let mut compared = 0;
+    for (column, want) in &theirs {
+        if uncomputed.contains(column) {
+            continue;
+        }
+        compared += 1;
+        let got = ours
+            .get(column)
+            .unwrap_or_else(|| panic!("we do not emit column {column}"));
+        assert_eq!(got, want, "column {column} differs");
+    }
+    assert!(
+        compared >= 55,
+        "expected to compare most of the columns, only did {compared}"
+    );
+}
+
+/// Targeted outputs appear only when targets are given.
+#[test]
+fn hs_metrics_are_absent_without_targets() {
+    assert!(
+        !run_binary().join("picard/hs_metrics").exists(),
+        "no targets means no targeted metrics"
+    );
+    assert!(
+        run_binary_targeted().join("picard/hs_metrics").exists(),
+        "targets must produce them"
     );
 }

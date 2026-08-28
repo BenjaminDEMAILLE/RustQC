@@ -8,8 +8,10 @@
   with mosdepth-compatible outputs, samtools-compatible stats, flagstat and
   idxstats, and preseq library complexity, all in a single pass over the
   alignment with one worker per contig, plus Picard-compatible
-  CollectWgsMetrics and CollectInsertSizeMetrics. Validated for exact parity
-  against mosdepth 0.3.14, samtools 1.24 and Picard 3.4.0.
+  CollectWgsMetrics, CollectInsertSizeMetrics and CollectGcBiasMetrics.
+  Passing `--targets` switches on targeted mode and Picard-compatible
+  CollectHsMetrics. Validated for exact parity against mosdepth 0.3.14,
+  samtools 1.24 and Picard 3.4.0.
 
 ### Changed
 
