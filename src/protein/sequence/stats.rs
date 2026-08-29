@@ -46,7 +46,8 @@ pub struct SequenceStats {
     pub gaps: u64,
     /// N50 length.
     pub n50: u64,
-    /// Number of sequences at or above N50.
+    /// Number of distinct lengths needed to reach N50, which is what seqkit
+    /// reports and is not the number of sequences.
     pub n50_num: u64,
     /// Residue counts, keyed by the residue character.
     pub composition: BTreeMap<u8, u64>,
@@ -149,13 +150,26 @@ fn tukey_quartiles(sorted: &[u64]) -> (u64, u64, u64) {
     (median(lower), median(sorted), median(upper))
 }
 
-/// N50 and the number of sequences reaching it.
+/// N50 and the number of *distinct lengths* needed to reach it.
+///
+/// The second figure is not the number of sequences, which is the obvious
+/// reading and the wrong one. seqkit walks the distinct lengths from longest
+/// down and counts how many it consumed: three sequences of lengths 10, 10 and
+/// 3 give `N50_num` of 1, not 2, because the two tens are one length. A file
+/// whose lengths are all distinct hides the difference entirely, which is why
+/// the project's protein fixtures did not catch it.
 fn n50(sorted_ascending: &[u64], total: u64) -> (u64, u64) {
     let mut cumulative = 0u64;
-    for (index, length) in sorted_ascending.iter().rev().enumerate() {
+    let mut distinct = 0u64;
+    let mut previous: Option<u64> = None;
+    for length in sorted_ascending.iter().rev() {
+        if previous != Some(*length) {
+            distinct += 1;
+            previous = Some(*length);
+        }
         cumulative += length;
         if cumulative * 2 >= total {
-            return (*length, index as u64 + 1);
+            return (*length, distinct);
         }
     }
     (0, 0)
@@ -204,6 +218,17 @@ mod tests {
         assert_eq!(stats.q2, 3, "the median itself");
         assert_eq!(stats.q1, 2, "median of [1, 2] is 1.5, rounded to 2");
         assert_eq!(stats.q3, 4, "median of [4, 5] is 4.5, rounded to 4");
+    }
+
+    #[test]
+    fn n50_num_counts_distinct_lengths_not_sequences() {
+        // Two sequences of 10 and one of 3: two sequences are needed to cover
+        // half of 23, but they share a length, so seqkit reports 1. Every
+        // length in the project fixtures is distinct, so only a case like this
+        // separates the two definitions.
+        let stats = SequenceStats::from_records(&records(&[3, 10, 10]));
+        assert_eq!(stats.n50, 10);
+        assert_eq!(stats.n50_num, 1, "not 2");
     }
 
     #[test]
