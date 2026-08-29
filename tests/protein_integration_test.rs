@@ -254,3 +254,67 @@ fn the_spectra_report_carries_every_section() {
         "this file annotates no charges, so the section is omitted"
     );
 }
+
+// ===================================================================
+// Coding-region assignment
+// ===================================================================
+
+/// Base assignment against Picard `CollectRnaSeqMetrics`.
+///
+/// The alignment is the DNA fixture and the annotation is the matching real
+/// chr22 slice, so the two describe the same 40 kb of genome. Only one
+/// transcript in that slice carries a CDS and no read covers it, so
+/// `CODING_BASES` is legitimately zero; what the fixture does exercise is the
+/// exonic, intronic and intergenic split, and that they account for every
+/// aligned base.
+#[test]
+fn coding_base_assignment_matches_picard() {
+    use rust_htslib::bam::{Read as BamRead, Reader};
+    use rustqc::protein::coding::{output::CodingCounts, RegionSets};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let genes = rustqc::gtf::parse_gtf(
+        root.join("tests/data/protein/genome.gtf").to_str().unwrap(),
+        &[],
+    )
+    .unwrap();
+    let regions = RegionSets::from_genes(genes.values());
+
+    let mut reader = Reader::from_path(root.join("tests/data/dna/test.dna.bam")).unwrap();
+    let header = reader.header().to_owned();
+    let mut counts = CodingCounts::default();
+    let mut record = rust_htslib::bam::Record::new();
+    while let Some(result) = reader.read(&mut record) {
+        result.unwrap();
+        let chrom = if record.tid() >= 0 {
+            String::from_utf8_lossy(header.tid2name(record.tid() as u32)).to_string()
+        } else {
+            String::new()
+        };
+        counts.process_read(&record, &chrom, &regions);
+    }
+
+    let reference = std::fs::read_to_string(fixture("genome.rnaseq_metrics.txt")).unwrap();
+    let header_row: Vec<&str> = reference.lines().nth(1).unwrap().split('\t').collect();
+    let value_row: Vec<&str> = reference.lines().nth(2).unwrap().split('\t').collect();
+    let want = |name: &str| -> u64 {
+        let index = header_row.iter().position(|c| *c == name).unwrap();
+        value_row[index].parse().unwrap_or(0)
+    };
+
+    assert_eq!(counts.total, want("PF_BASES"), "PF_BASES");
+    assert_eq!(counts.aligned, want("PF_ALIGNED_BASES"), "PF_ALIGNED_BASES");
+    assert_eq!(counts.coding, want("CODING_BASES"), "CODING_BASES");
+    assert_eq!(counts.utr, want("UTR_BASES"), "UTR_BASES");
+    assert_eq!(counts.intronic, want("INTRONIC_BASES"), "INTRONIC_BASES");
+    assert_eq!(
+        counts.intergenic,
+        want("INTERGENIC_BASES"),
+        "INTERGENIC_BASES"
+    );
+    assert_eq!(
+        counts.coding + counts.utr + counts.intronic + counts.intergenic,
+        counts.aligned,
+        "the four classes must account for every aligned base"
+    );
+}

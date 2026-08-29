@@ -79,6 +79,7 @@ fn main() -> Result<()> {
         cli::Commands::Dna(args) => (args.quiet, args.verbose),
         cli::Commands::Protein(args) => match &args.mode {
             cli::ProteinMode::Sequence(args) => (args.quiet, args.verbose),
+            cli::ProteinMode::Coding(args) => (args.quiet, args.verbose),
             #[cfg(feature = "proteomics")]
             cli::ProteinMode::Spectra(args) => (args.quiet, args.verbose),
         },
@@ -113,6 +114,7 @@ fn main() -> Result<()> {
 fn run_protein(args: cli::ProteinArgs, ui: &Ui) -> Result<()> {
     match args.mode {
         cli::ProteinMode::Sequence(args) => run_protein_sequence(args, ui),
+        cli::ProteinMode::Coding(args) => run_protein_coding(args, ui),
         #[cfg(feature = "proteomics")]
         cli::ProteinMode::Spectra(args) => run_protein_spectra(args, ui),
     }
@@ -244,6 +246,83 @@ fn run_protein_spectra(args: cli::ProteinSpectraArgs, ui: &Ui) -> Result<()> {
     }
 
     ui.finish("Protein spectra QC", run_start.elapsed());
+    Ok(())
+}
+
+/// Run `protein coding`: where reads fall relative to coding sequence.
+fn run_protein_coding(args: cli::ProteinCodingArgs, ui: &Ui) -> Result<()> {
+    use rust_htslib::bam::{Read as BamRead, Reader};
+    use rustqc::protein::coding::{output, output::CodingCounts, RegionSets};
+
+    let run_start = Instant::now();
+
+    let outdir = Path::new(&args.outdir);
+    std::fs::create_dir_all(outdir)
+        .with_context(|| format!("Failed to create output directory: {}", outdir.display()))?;
+
+    ui.header(
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHORT_HASH"),
+        env!("BUILD_TIMESTAMP"),
+        Some(&rustqc::cpu::cpu_info_line()),
+    );
+    ui.config("Output dir", &args.outdir);
+    ui.config("Annotation", &args.gtf);
+
+    let genes = rustqc::gtf::parse_gtf(&args.gtf, &[])
+        .with_context(|| format!("Failed to parse annotation: {}", args.gtf))?;
+    let regions = RegionSets::from_genes(genes.values());
+    let (coding, utr, intronic) = regions.territories();
+    ui.detail(&format!(
+        "annotation: {coding} coding, {utr} UTR, {intronic} intronic bases"
+    ));
+
+    let dir = if args.flat_output {
+        outdir.to_path_buf()
+    } else {
+        outdir.join("coding")
+    };
+    std::fs::create_dir_all(&dir)?;
+
+    for path in &args.input {
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str())
+            .to_string();
+
+        let mut reader =
+            Reader::from_path(path).with_context(|| format!("Failed to open alignment: {path}"))?;
+        let header = reader.header().to_owned();
+        let mut counts = CodingCounts::default();
+        let mut record = rust_htslib::bam::Record::new();
+        while let Some(result) = reader.read(&mut record) {
+            result.context("Failed to read record")?;
+            let chrom = if record.tid() >= 0 {
+                String::from_utf8_lossy(header.tid2name(record.tid() as u32)).to_string()
+            } else {
+                String::new()
+            };
+            counts.process_read(&record, &chrom, &regions);
+        }
+
+        let sample_name = args.sample_name.clone().unwrap_or_else(|| {
+            Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("sample")
+                .to_string()
+        });
+        let metrics = dir.join(format!("{sample_name}.rnaseq_metrics.txt"));
+        output::write_coding_metrics(&counts, &metrics)?;
+        ui.output_item("protein coding", &metrics.display().to_string());
+        ui.detail(&format!(
+            "{name}: {:.1}% of aligned bases are exonic",
+            counts.mrna_fraction() * 100.0
+        ));
+    }
+
+    ui.finish("Protein coding QC", run_start.elapsed());
     Ok(())
 }
 

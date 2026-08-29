@@ -9,6 +9,7 @@
 //!   relative to coding sequence;
 //! - `spectra` reads mzML and asks whether a mass spectrometry run is healthy.
 
+pub mod coding;
 pub mod sequence;
 
 /// Mass spectrometry analysis, available when built with the `proteomics`

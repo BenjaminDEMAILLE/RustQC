@@ -61,6 +61,9 @@ pub enum ProteinMode {
     /// Protein FASTA QC: length statistics, composition and defects.
     Sequence(ProteinSequenceArgs),
 
+    /// Coding-region QC from an alignment and an annotation.
+    Coding(ProteinCodingArgs),
+
     /// Mass spectrometry run QC from mzML.
     ///
     /// Only offered when built with the `proteomics` feature, which is on by
@@ -68,6 +71,82 @@ pub enum ProteinMode {
     /// present and failing.
     #[cfg(feature = "proteomics")]
     Spectra(ProteinSpectraArgs),
+}
+
+/// Arguments for `protein coding`.
+#[derive(Parser, Debug)]
+#[command(
+    next_line_help = false,
+    term_width = 120,
+    help_template = "\
+{about-with-newline}
+{usage-heading} {usage}
+
+{all-args}"
+)]
+pub struct ProteinCodingArgs {
+    /// Alignment file(s)
+    #[arg(value_name = "INPUT", num_args = 1.., required = true, help_heading = "Input / Output")]
+    pub input: Vec<String>,
+
+    /// GTF gene annotation (plain or .gz)
+    #[arg(
+        short,
+        long,
+        value_name = "GTF",
+        env = "RUSTQC_GTF",
+        help_heading = "Input / Output"
+    )]
+    pub gtf: String,
+
+    /// Output directory [default: .]
+    #[arg(
+        short,
+        long,
+        default_value = ".",
+        hide_default_value = true,
+        env = "RUSTQC_OUTDIR",
+        help_heading = "Input / Output"
+    )]
+    pub outdir: String,
+
+    /// Override sample name for output filenames (default: derived from filename)
+    #[arg(
+        long,
+        value_name = "NAME",
+        env = "RUSTQC_SAMPLE_NAME",
+        help_heading = "Input / Output"
+    )]
+    pub sample_name: Option<String>,
+
+    /// Write outputs to a flat directory (no subdirs)
+    #[arg(
+        long,
+        default_value_t = false,
+        env = "RUSTQC_FLAT_OUTPUT",
+        help_heading = "Input / Output"
+    )]
+    pub flat_output: bool,
+
+    /// Suppress output except warnings/errors
+    #[arg(
+        short = 'q',
+        long,
+        conflicts_with = "verbose",
+        env = "RUSTQC_QUIET",
+        help_heading = "General"
+    )]
+    pub quiet: bool,
+
+    /// Show additional detail
+    #[arg(
+        short = 'v',
+        long,
+        conflicts_with = "quiet",
+        env = "RUSTQC_VERBOSE",
+        help_heading = "General"
+    )]
+    pub verbose: bool,
 }
 
 /// Arguments for `protein spectra`.
@@ -1204,6 +1283,25 @@ mod tests {
                     assert_eq!(args.outdir, "/tmp/ms");
                 }
                 _ => panic!("Expected the spectra mode"),
+            },
+            _ => panic!("Expected Protein subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_protein_coding_requires_an_annotation() {
+        assert!(
+            Cli::try_parse_from(["rustqc", "protein", "coding", "a.bam"]).is_err(),
+            "--gtf is required"
+        );
+        let cli = Cli::parse_from(["rustqc", "protein", "coding", "a.bam", "--gtf", "g.gtf"]);
+        match cli.command {
+            Commands::Protein(args) => match args.mode {
+                ProteinMode::Coding(args) => {
+                    assert_eq!(args.input, vec!["a.bam"]);
+                    assert_eq!(args.gtf, "g.gtf");
+                }
+                _ => panic!("Expected the coding mode"),
             },
             _ => panic!("Expected Protein subcommand"),
         }

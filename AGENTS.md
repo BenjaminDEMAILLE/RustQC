@@ -90,6 +90,10 @@ src/
       output.rs       — The six mosdepth-compatible writers (bgzf for the BED outputs)
   protein/
     mod.rs
+    coding/
+      mod.rs        — Coding-region QC from an alignment and an annotation
+      regions.rs    — Coding, UTR, intronic and intergenic interval sets
+      output.rs     — Base assignment and the CollectRnaSeqMetrics writer
     sequence/
       mod.rs        — FASTA parsing into per-sequence records
       stats.rs      — Length statistics reproducing seqkit stats -a
