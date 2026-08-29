@@ -117,7 +117,9 @@ src/
       junction_annotation.rs — junction_annotation.py reimplementation
       junction_saturation.rs — junction_saturation.py reimplementation
       plots.rs              — RSeQC plot generation (duplication, junctions, etc.)
+      genebody_coverage.rs  — geneBody_coverage.py reimplementation
       read_distribution.rs  — read_distribution.py reimplementation
+      read_gc.rs            — read_GC.py reimplementation
       read_duplication.rs   — read_duplication.py reimplementation
       tin.rs                — TIN (Transcript Integrity Number) analysis
 tests/

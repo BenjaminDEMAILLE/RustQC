@@ -14,6 +14,9 @@
   `genome_results.txt`, the raw data tables and an HTML summary. Validated
   against mosdepth 0.3.14, samtools 1.24, Picard 3.4.0 and Qualimap 2.3.
 
+- RSeQC `geneBody_coverage` and `read_GC` equivalents, bringing the RSeQC
+  tools RustQC reimplements from eight to ten (#127).
+
 ### Changed
 
 - Internal: assay-agnostic analyses (BAM flag helpers, read-level statistics,

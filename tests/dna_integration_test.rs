@@ -1371,3 +1371,61 @@ fn qualimap_html_report_is_written_and_well_formed() {
     assert!(html.contains("5,642"), "missing the read count");
     assert!(html.contains("16.7746X"), "missing the mean coverage");
 }
+
+// ===================================================================
+// RSeQC read_GC
+// ===================================================================
+
+/// RSeQC's `read_GC.py` distribution, against its own output.
+///
+/// The fixture is the DNA alignment rather than the RNA one: the RNA test BAM
+/// carries synthetic all-A sequences, so every read there is 0 percent GC and
+/// the histogram collapses to a single row that would prove nothing.
+#[test]
+fn read_gc_distribution_matches_rseqc() {
+    use rustqc::rna::rseqc::read_gc::ReadGcAccum;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut reader = bam::Reader::from_path(root.join("tests/data/dna/test.dna.bam")).unwrap();
+    let mut accum = ReadGcAccum::new();
+    let mut record = bam::Record::new();
+    while let Some(result) = reader.read(&mut record) {
+        result.unwrap();
+        accum.process_read(&record, 30);
+    }
+
+    let want: std::collections::BTreeMap<String, u64> =
+        std::fs::read_to_string(root.join("tests/expected/rseqc/read_gc.GC.xls"))
+            .unwrap()
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(percent, count)| (percent.to_string(), count.parse().unwrap()))
+            .collect();
+
+    let got: std::collections::BTreeMap<String, u64> = accum
+        .distribution()
+        .into_iter()
+        .map(|(percent, count)| (format!("{percent:.2}"), count))
+        .collect();
+
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "distinct GC values: got {}, want {}",
+        got.len(),
+        want.len()
+    );
+    for (percent, count) in &want {
+        assert_eq!(
+            got.get(percent),
+            Some(count),
+            "GC {percent}%: got {:?}, want {count}",
+            got.get(percent)
+        );
+    }
+
+    let total: u64 = want.values().sum();
+    assert_eq!(accum.counted(), total, "every read must land in a bin");
+    assert_eq!(accum.reads, 5642, "every mapped read counts");
+}

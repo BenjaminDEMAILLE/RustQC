@@ -7,12 +7,14 @@ pub mod accumulators;
 pub mod common;
 pub mod plots;
 
+pub mod genebody_coverage;
 pub mod infer_experiment;
 pub mod inner_distance;
 pub mod junction_annotation;
 pub mod junction_saturation;
 pub mod read_distribution;
 pub mod read_duplication;
+pub mod read_gc;
 pub mod tin;
 
 // bam_stat and the samtools writers are read-level and assay-agnostic; they
