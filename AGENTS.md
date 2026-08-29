@@ -108,6 +108,10 @@ src/
       output.rs     — Qualimap-compatible output file generation
       plots.rs      — Gene body coverage plot generation (PNG/SVG)
       report.rs     — Qualimap HTML report generation
+    rnaseq_metrics/
+      mod.rs        — Picard CollectRnaSeqMetrics reimplementation
+      regions.rs    — Coding, UTR, intronic and intergenic interval sets
+      output.rs     — Base assignment and the metrics writer
     rseqc/
       mod.rs                — Re-exports all RSeQC modules + common helpers
       accumulators.rs       — Shared RSeQC accumulator infrastructure (read dispatch)

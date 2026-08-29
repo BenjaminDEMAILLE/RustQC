@@ -14,6 +14,9 @@
   `genome_results.txt`, the raw data tables and an HTML summary. Validated
   against mosdepth 0.3.14, samtools 1.24, Picard 3.4.0 and Qualimap 2.3.
 
+- Picard `CollectRnaSeqMetrics` base assignment added to `rustqc rna`: coding,
+  UTR, intronic and intergenic bases, computed in the existing single pass.
+
 ### Changed
 
 - Internal: assay-agnostic analyses (BAM flag helpers, read-level statistics,

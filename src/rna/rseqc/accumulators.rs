@@ -49,6 +49,10 @@ pub struct RseqcAnnotations<'a> {
 
     /// TIN index for transcript integrity number calculation.
     pub tin_index: Option<&'a super::tin::TinIndex>,
+
+    /// Coding, exonic and transcribed interval sets for the Picard-compatible
+    /// RNA-seq metrics.
+    pub coding_regions: Option<&'a crate::rna::rnaseq_metrics::RegionSets>,
 }
 
 /// Per-tool configuration parameters.
@@ -928,6 +932,8 @@ pub struct RseqcAccumulators {
     pub tin: Option<TinAccum>,
     /// preseq library complexity accumulator (`None` when disabled).
     pub preseq: Option<PreseqAccum>,
+    /// Picard CollectRnaSeqMetrics base assignment (`None` when disabled).
+    pub rnaseq_metrics: Option<crate::rna::rnaseq_metrics::output::CodingCounts>,
 }
 
 impl RseqcAccumulators {
@@ -943,6 +949,7 @@ impl RseqcAccumulators {
             inner_dist: None,
             tin: None,
             preseq: None,
+            rnaseq_metrics: None,
         }
     }
 
@@ -1001,6 +1008,11 @@ impl RseqcAccumulators {
             } else {
                 None
             },
+            // Enabled whenever the coding region sets were built, which is
+            // whenever the annotation carried enough to build them.
+            rnaseq_metrics: annotations
+                .and_then(|a| a.coding_regions)
+                .map(|_| crate::rna::rnaseq_metrics::output::CodingCounts::default()),
         }
     }
 
@@ -1030,6 +1042,15 @@ impl RseqcAccumulators {
         // infer_experiment: needs gene model overlap
         if let (Some(ref mut accum), Some(model)) = (&mut self.infer_exp, annotations.gene_model) {
             accum.process_read(record, chrom, model, config.mapq_cut);
+        }
+
+        // CollectRnaSeqMetrics: needs the coding region sets and the original
+        // chromosome name, since the interval sets are keyed as the GTF has
+        // them rather than uppercased.
+        if let (Some(ref mut accum), Some(regions)) =
+            (&mut self.rnaseq_metrics, annotations.coding_regions)
+        {
+            accum.process_read(record, chrom, regions);
         }
 
         // read_distribution: needs region sets, uses uppercased chrom
@@ -1115,6 +1136,9 @@ impl RseqcAccumulators {
         }
         if let (Some(ref mut a), Some(b)) = (&mut self.tin, other.tin) {
             a.merge(b);
+        }
+        if let (Some(ref mut a), Some(b)) = (&mut self.rnaseq_metrics, other.rnaseq_metrics) {
+            a.merge(&b);
         }
         if let (Some(ref mut a), Some(b)) = (&mut self.preseq, other.preseq) {
             a.merge(b);

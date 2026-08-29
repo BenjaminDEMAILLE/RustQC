@@ -6,6 +6,7 @@
 pub mod dupradar;
 pub mod featurecounts;
 pub mod qualimap;
+pub mod rnaseq_metrics;
 pub mod rseqc;
 
 // These analyses are not RNA-specific and now live in `crate::common`.

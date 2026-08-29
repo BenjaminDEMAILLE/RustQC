@@ -1265,6 +1265,16 @@ fn run_rna(args: cli::RnaArgs, ui: &Ui) -> Result<()> {
         None
     };
 
+    // Picard's CollectRnaSeqMetrics needs the annotation split into coding,
+    // exonic and transcribed intervals. Built once for the run, like the other
+    // annotation-derived indexes.
+    let coding_regions = if config.rnaseq_metrics.enabled {
+        ui.detail("Building coding region sets...");
+        Some(rna::rnaseq_metrics::RegionSets::from_genes(genes.values()))
+    } else {
+        None
+    };
+
     let tin_sample_size = config.tin.sample_size.unwrap_or(100) as usize;
     let tin_index = if config.tin.enabled {
         ui.detail("Building TIN index...");
@@ -1330,6 +1340,7 @@ fn run_rna(args: cli::RnaArgs, ui: &Ui) -> Result<()> {
 
     // Build the shared parameters struct for process_single_bam
     let shared = SharedParams {
+        coding_regions: coding_regions.as_ref(),
         ui,
         stranded: effective_stranded,
         paired: effective_paired,
@@ -1615,6 +1626,8 @@ struct SharedParams<'a> {
     inner_distance_step: i64,
     /// Pre-built TIN index for transcript integrity analysis (from GTF).
     tin_index: Option<&'a rna::rseqc::tin::TinIndex>,
+    /// Coding, exonic and transcribed interval sets for CollectRnaSeqMetrics.
+    coding_regions: Option<&'a rna::rnaseq_metrics::RegionSets>,
     /// Number of equally-spaced positions to sample per transcript for TIN.
     tin_sample_size: usize,
     /// Minimum read-start count per transcript to compute TIN.
@@ -1804,6 +1817,7 @@ fn process_single_bam(
         exon_bitset: params.exon_bitset,
         transcript_tree: params.transcript_tree,
         tin_index: params.tin_index,
+        coding_regions: params.coding_regions,
     };
 
     let any_rseqc_enabled = rseqc_config.bam_stat_enabled
@@ -2474,6 +2488,27 @@ fn write_rseqc_outputs(
             format_count(result.total_tags - result.unassigned_tags),
         ));
         written.push(("read_distribution".into(), p));
+    }
+
+    // --- CollectRnaSeqMetrics ---
+    if let Some(counts) = accums.rnaseq_metrics {
+        let dir_path = if params.flat_output {
+            outdir.to_path_buf()
+        } else {
+            outdir.join("picard").join("rnaseq_metrics")
+        };
+        std::fs::create_dir_all(&dir_path)?;
+        let output_path = dir_path.join(format!("{sample_name}.rnaseq_metrics.txt"));
+        rna::rnaseq_metrics::output::write_coding_metrics(&counts, &output_path)?;
+        let p = output_path.display().to_string();
+        ui.output_item("CollectRnaSeqMetrics", &p);
+        ui.output_detail(&format!(
+            "{} of aligned bases exonic, {} intronic, {} intergenic",
+            format_pct(counts.coding + counts.utr, counts.aligned),
+            format_pct(counts.intronic, counts.aligned),
+            format_pct(counts.intergenic, counts.aligned),
+        ));
+        written.push(("rnaseq_metrics".into(), p));
     }
 
     // --- junction_annotation ---

@@ -162,6 +162,10 @@ pub struct RnaConfig {
     #[serde(default)]
     pub samtools_stats: SamtoolsStatsConfig,
 
+    /// Picard CollectRnaSeqMetrics configuration.
+    #[serde(default)]
+    pub rnaseq_metrics: RnaSeqMetricsConfig,
+
     /// preseq lc_extrap library complexity extrapolation configuration.
     #[serde(default)]
     pub preseq: PreseqConfig,
@@ -909,6 +913,27 @@ impl RnaConfig {
     /// Returns true if any samtools-compatible output is enabled.
     pub fn any_samtools_output(&self) -> bool {
         self.flagstat.enabled || self.idxstats.enabled || self.samtools_stats.enabled
+    }
+}
+
+/// Configuration for the Picard-compatible RNA-seq base assignment.
+///
+/// Example:
+/// ```yaml
+/// rnaseq_metrics:
+///   enabled: true
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct RnaSeqMetricsConfig {
+    /// Whether to assign aligned bases to coding, UTR, intronic and
+    /// intergenic. Defaults to true.
+    pub enabled: bool,
+}
+
+impl Default for RnaSeqMetricsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
