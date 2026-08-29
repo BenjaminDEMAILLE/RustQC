@@ -75,6 +75,7 @@ pub mod dna;
 pub mod gtf;
 pub mod io;
 pub mod protein;
+pub mod reads;
 pub mod rna;
 pub mod summary;
 

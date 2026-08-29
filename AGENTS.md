@@ -88,6 +88,11 @@ src/
     mosdepth/
       mod.rs          — Per-contig summarisation feeding the mosdepth outputs
       output.rs       — The six mosdepth-compatible writers (bgzf for the BED outputs)
+  reads/
+    mod.rs
+    fastq.rs        — Streaming FASTQ reader
+    metrics.rs      — Read-level metrics (seqkit and FastQC conventions)
+    output.rs       — seqkit stats table and fastqc_data.txt
   protein/
     mod.rs
     sequence/

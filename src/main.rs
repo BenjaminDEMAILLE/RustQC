@@ -77,6 +77,7 @@ fn main() -> Result<()> {
     let (quiet, verbose) = match &cli.command {
         cli::Commands::Rna(args) => (args.quiet, args.verbose),
         cli::Commands::Dna(args) => (args.quiet, args.verbose),
+        cli::Commands::Reads(args) => (args.quiet, args.verbose),
         cli::Commands::Protein(args) => match &args.mode {
             cli::ProteinMode::Sequence(args) => (args.quiet, args.verbose),
             #[cfg(feature = "proteomics")]
@@ -105,8 +106,151 @@ fn main() -> Result<()> {
     match cli.command {
         cli::Commands::Rna(args) => run_rna(args, &ui),
         cli::Commands::Dna(args) => run_dna(args, &ui),
+        cli::Commands::Reads(args) => run_reads(args, &ui),
         cli::Commands::Protein(args) => run_protein(args, &ui),
     }
+}
+
+/// Run `reads`: raw FASTQ quality control.
+///
+/// Records stream through the accumulator and are never all held at once, so
+/// memory does not grow with the file.
+fn run_reads(args: cli::ReadsArgs, ui: &Ui) -> Result<()> {
+    use rustqc::reads::{fastq, metrics::ReadMetrics, output};
+
+    let run_start = Instant::now();
+    let timestamp_start = format_utc_now();
+
+    let (_merged, config_paths) = config::load_merged_config(args.config.as_deref())?;
+    let outdir = Path::new(&args.outdir);
+    std::fs::create_dir_all(outdir)
+        .with_context(|| format!("Failed to create output directory: {}", outdir.display()))?;
+
+    ui.header(
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHORT_HASH"),
+        env!("BUILD_TIMESTAMP"),
+        Some(&rustqc::cpu::cpu_info_line()),
+    );
+    for (path, source) in &config_paths {
+        ui.config("Config", &format!("{} ({source})", path.display()));
+    }
+    ui.config("Output dir", &args.outdir);
+
+    let dir = if args.flat_output {
+        outdir.to_path_buf()
+    } else {
+        outdir.join("reads")
+    };
+    std::fs::create_dir_all(&dir)?;
+
+    let mut table_rows = Vec::new();
+    let mut inputs = Vec::new();
+
+    for path in &args.input {
+        let file_start = Instant::now();
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str())
+            .to_string();
+
+        let mut metrics = ReadMetrics::default();
+        match fastq::for_each_record(Path::new(path), |r| {
+            metrics.observe(&r.sequence, &r.quality)
+        }) {
+            Ok(()) => {
+                let sample_name = args.sample_name.clone().unwrap_or_else(|| {
+                    // Strip both extensions of a .fastq.gz, not just the last.
+                    let stem = Path::new(path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("sample");
+                    Path::new(stem)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(stem)
+                        .to_string()
+                });
+
+                let data = dir.join(format!("{sample_name}_fastqc_data.txt"));
+                output::write_fastqc_data(&name, &metrics, &data)?;
+                ui.output_item("reads", &data.display().to_string());
+
+                ui.detail(&format!(
+                    "{name}: {} reads, {} bases, mean quality {:.2}",
+                    metrics.reads,
+                    metrics.bases,
+                    metrics.average_quality()
+                ));
+
+                inputs.push(summary::InputSummary {
+                    bam_file: path.clone(),
+                    status: "success".to_string(),
+                    error: None,
+                    runtime_seconds: file_start.elapsed().as_secs_f64(),
+                    counting: None,
+                    dupradar: None,
+                    dna: None,
+                    outputs: vec![summary::OutputFile {
+                        tool: "reads".to_string(),
+                        path: data.display().to_string(),
+                    }],
+                });
+                table_rows.push((name, metrics));
+            }
+            Err(e) => {
+                ui.bam_result_err(&name, &format!("{e:#}"));
+                inputs.push(summary::InputSummary {
+                    bam_file: path.clone(),
+                    status: "failed".to_string(),
+                    error: Some(format!("{e:#}")),
+                    runtime_seconds: file_start.elapsed().as_secs_f64(),
+                    counting: None,
+                    dupradar: None,
+                    dna: None,
+                    outputs: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if !table_rows.is_empty() {
+        let stats_path = dir.join("read_stats.tsv");
+        output::write_seqkit_stats(&table_rows, &stats_path)?;
+        ui.output_item("reads", &stats_path.display().to_string());
+    }
+
+    if let Some(ref json_path) = args.json_summary {
+        let summary = summary::RunSummary {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: env!("GIT_SHORT_HASH").to_string(),
+            binary_target: cpu::binary_target().to_string(),
+            cpu_features: cpu::detected_features()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            timestamp_start,
+            timestamp_end: format_utc_now(),
+            runtime_seconds: run_start.elapsed().as_secs_f64(),
+            inputs,
+        };
+        let json = serde_json::to_string_pretty(&summary)?;
+        if json_path == "-" {
+            println!("{json}");
+        } else {
+            let path = if json_path.is_empty() {
+                outdir.join("rustqc_summary.json")
+            } else {
+                PathBuf::from(json_path)
+            };
+            std::fs::write(&path, json)
+                .with_context(|| format!("Failed to write JSON summary: {}", path.display()))?;
+        }
+    }
+
+    ui.finish("Read QC", run_start.elapsed());
+    Ok(())
 }
 
 /// Run the protein QC pipeline, dispatching on the chosen mode.

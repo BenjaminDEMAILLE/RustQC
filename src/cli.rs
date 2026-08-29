@@ -40,11 +40,92 @@ pub enum Commands {
     /// to switch to targeted (exome or panel) mode.
     Dna(DnaArgs),
 
+    /// Read QC — raw FASTQ quality control, before alignment.
+    ///
+    /// Applies whatever the library was for, which is why it sits apart from
+    /// the assay-specific subcommands. Outputs are compatible with `seqkit
+    /// stats` and FastQC.
+    Reads(ReadsArgs),
+
     /// Protein QC — sequence, coding-region and mass spectrometry analyses.
     ///
     /// Three modes taking different inputs entirely, so the mode is chosen
     /// explicitly rather than inferred from which flags were given.
     Protein(ProteinArgs),
+}
+
+/// Arguments for the `reads` subcommand.
+#[derive(Parser, Debug)]
+#[command(
+    next_line_help = false,
+    term_width = 120,
+    help_template = "\
+{about-with-newline}
+{usage-heading} {usage}
+
+{all-args}"
+)]
+pub struct ReadsArgs {
+    /// FASTQ file(s), plain or .gz
+    #[arg(value_name = "FASTQ", num_args = 1.., required = true, help_heading = "Input / Output")]
+    pub input: Vec<String>,
+
+    /// Output directory [default: .]
+    #[arg(
+        short,
+        long,
+        default_value = ".",
+        hide_default_value = true,
+        env = "RUSTQC_OUTDIR",
+        help_heading = "Input / Output"
+    )]
+    pub outdir: String,
+
+    /// Override sample name for output filenames (default: derived from filename)
+    #[arg(
+        long,
+        value_name = "NAME",
+        env = "RUSTQC_SAMPLE_NAME",
+        help_heading = "Input / Output"
+    )]
+    pub sample_name: Option<String>,
+
+    /// Write outputs to a flat directory (no subdirs)
+    #[arg(
+        long,
+        default_value_t = false,
+        env = "RUSTQC_FLAT_OUTPUT",
+        help_heading = "Input / Output"
+    )]
+    pub flat_output: bool,
+
+    /// YAML configuration file (see also: RUSTQC_CONFIG env var)
+    #[arg(short, long, value_name = "CONFIG", help_heading = "Input / Output")]
+    pub config: Option<String>,
+
+    /// JSON summary path (use "-" for stdout)
+    #[arg(short = 'j', long = "json-summary", value_name = "PATH", num_args = 0..=1, default_missing_value = "", env = "RUSTQC_JSON_SUMMARY", help_heading = "Input / Output")]
+    pub json_summary: Option<String>,
+
+    /// Suppress output except warnings/errors
+    #[arg(
+        short = 'q',
+        long,
+        conflicts_with = "verbose",
+        env = "RUSTQC_QUIET",
+        help_heading = "General"
+    )]
+    pub quiet: bool,
+
+    /// Show additional detail
+    #[arg(
+        short = 'v',
+        long,
+        conflicts_with = "quiet",
+        env = "RUSTQC_VERBOSE",
+        help_heading = "General"
+    )]
+    pub verbose: bool,
 }
 
 /// Arguments for the `protein` subcommand.
@@ -1206,6 +1287,38 @@ mod tests {
                 _ => panic!("Expected the spectra mode"),
             },
             _ => panic!("Expected Protein subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_reads_default_args() {
+        let cli = Cli::parse_from(["rustqc", "reads", "sample_1.fastq.gz"]);
+        match cli.command {
+            Commands::Reads(args) => {
+                assert_eq!(args.input, vec!["sample_1.fastq.gz"]);
+                assert_eq!(args.outdir, ".");
+                assert!(!args.flat_output);
+            }
+            _ => panic!("Expected Reads subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_reads_accepts_several_files() {
+        let cli = Cli::parse_from([
+            "rustqc",
+            "reads",
+            "a_1.fq.gz",
+            "a_2.fq.gz",
+            "--outdir",
+            "/tmp/qc",
+        ]);
+        match cli.command {
+            Commands::Reads(args) => {
+                assert_eq!(args.input, vec!["a_1.fq.gz", "a_2.fq.gz"]);
+                assert_eq!(args.outdir, "/tmp/qc");
+            }
+            _ => panic!("Expected Reads subcommand"),
         }
     }
 }
