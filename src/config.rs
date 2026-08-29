@@ -162,6 +162,10 @@ pub struct RnaConfig {
     #[serde(default)]
     pub samtools_stats: SamtoolsStatsConfig,
 
+    /// bigWig coverage track configuration.
+    #[serde(default)]
+    pub coverage_tracks: CoverageTracksConfig,
+
     /// preseq lc_extrap library complexity extrapolation configuration.
     #[serde(default)]
     pub preseq: PreseqConfig,
@@ -909,6 +913,40 @@ impl RnaConfig {
     /// Returns true if any samtools-compatible output is enabled.
     pub fn any_samtools_output(&self) -> bool {
         self.flagstat.enabled || self.idxstats.enabled || self.samtools_stats.enabled
+    }
+}
+
+/// Configuration for the bigWig coverage tracks.
+///
+/// Replaces the `bedtools genomecov` into `bedGraphToBigWig` round-trip that
+/// pipelines otherwise run per strand.
+///
+/// Example:
+/// ```yaml
+/// coverage_tracks:
+///   enabled: true
+///   stranded: true
+///   scale: 1.0
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct CoverageTracksConfig {
+    /// Whether to write coverage tracks. Off by default, since a bigWig is
+    /// large next to the other outputs and not every run wants one.
+    pub enabled: bool,
+    /// Write separate forward and reverse tracks rather than one combined.
+    pub stranded: bool,
+    /// Multiplies every depth, for normalised tracks. 1.0 leaves raw counts.
+    pub scale: f32,
+}
+
+impl Default for CoverageTracksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stranded: false,
+            scale: 1.0,
+        }
     }
 }
 

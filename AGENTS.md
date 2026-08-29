@@ -67,6 +67,10 @@ src/
     bam_flags.rs      — BAM flag constants and aux-tag helpers
     bam_stat.rs       — bam_stat.py reimplementation, result types
     bam_stat_accum.rs — Read-level counter accumulator feeding bam_stat and samtools
+    coverage/
+      mod.rs          — Coverage tracks
+      bedgraph.rs     — bedtools genomecov semantics, per-contig accumulators
+      bigwig.rs       — bigWig writing via bigtools (behind the `bigwig` feature)
     cpp_rng.rs        — C++ RNG FFI shim for preseq bootstrap reproducibility
     preseq.rs         — preseq lc_extrap library complexity extrapolation
     samtools/

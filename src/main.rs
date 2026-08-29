@@ -902,6 +902,29 @@ fn depth_worker_budget(threads: usize, override_value: Option<usize>, largest: u
     threads.min(affordable).max(1)
 }
 
+/// Write one coverage track, returning whether a file was produced.
+///
+/// Split out so the `bigwig` feature gate lives in one place: without it the
+/// tracks are simply not written, and the run says so rather than failing.
+#[cfg(feature = "bigwig")]
+fn write_coverage_track(
+    intervals: &[rustqc::common::coverage::bedgraph::Interval],
+    chrom_sizes: &[(String, u64)],
+    path: &Path,
+) -> Result<bool> {
+    rustqc::common::coverage::bigwig::write_bigwig(intervals, chrom_sizes, path)
+}
+
+/// Stub for builds without the `bigwig` feature.
+#[cfg(not(feature = "bigwig"))]
+fn write_coverage_track(
+    _intervals: &[rustqc::common::coverage::bedgraph::Interval],
+    _chrom_sizes: &[(String, u64)],
+    _path: &Path,
+) -> Result<bool> {
+    Ok(false)
+}
+
 /// Reconstruct the command line for the featureCounts-compatible header comment.
 fn reconstruct_command_line(args: &cli::RnaArgs) -> String {
     let mut parts = vec![format!(
@@ -1330,6 +1353,7 @@ fn run_rna(args: cli::RnaArgs, ui: &Ui) -> Result<()> {
 
     // Build the shared parameters struct for process_single_bam
     let shared = SharedParams {
+        coverage_scale: config.coverage_tracks.scale,
         ui,
         stranded: effective_stranded,
         paired: effective_paired,
@@ -1615,6 +1639,8 @@ struct SharedParams<'a> {
     inner_distance_step: i64,
     /// Pre-built TIN index for transcript integrity analysis (from GTF).
     tin_index: Option<&'a rna::rseqc::tin::TinIndex>,
+    /// Multiplies every coverage depth, for normalised tracks.
+    coverage_scale: f32,
     /// Number of equally-spaced positions to sample per transcript for TIN.
     tin_sample_size: usize,
     /// Minimum read-start count per transcript to compute TIN.
@@ -1763,6 +1789,15 @@ fn process_single_bam(
 
     // === Build RSeQC config and annotations ===
     let rseqc_config = RseqcConfig {
+        coverage_strands: if config.coverage_tracks.enabled {
+            if config.coverage_tracks.stranded {
+                vec![Some('+'), Some('-')]
+            } else {
+                vec![None]
+            }
+        } else {
+            Vec::new()
+        },
         mapq_cut: params.mapq_cut,
         infer_experiment_sample_size: params.infer_experiment_sample_size,
         min_intron: params.min_intron,
@@ -2474,6 +2509,49 @@ fn write_rseqc_outputs(
             format_count(result.total_tags - result.unassigned_tags),
         ));
         written.push(("read_distribution".into(), p));
+    }
+
+    // --- coverage tracks ---
+    if accums.coverage.is_enabled() {
+        let dir_path = if params.flat_output {
+            outdir.to_path_buf()
+        } else {
+            outdir.join("coverage")
+        };
+        std::fs::create_dir_all(&dir_path)?;
+        let chrom_order: Vec<String> = bam_header_refs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        for (strand, intervals) in accums
+            .coverage
+            .into_intervals(&chrom_order, params.coverage_scale)
+        {
+            let suffix = match strand {
+                Some('+') => ".forward",
+                Some('-') => ".reverse",
+                _ => "",
+            };
+            let output_path = dir_path.join(format!("{sample_name}{suffix}.bigWig"));
+            let wrote = write_coverage_track(&intervals, bam_header_refs, &output_path)?;
+            if wrote {
+                let p = output_path.display().to_string();
+                ui.output_item("coverage", &p);
+                ui.output_detail(&format!(
+                    "{} intervals",
+                    format_count(intervals.len() as u64)
+                ));
+                written.push(("coverage".into(), p));
+            } else {
+                ui.warn(&format!(
+                    "no coverage on the {} strand, so no track was written",
+                    match strand {
+                        Some(s) => s.to_string(),
+                        None => "combined".to_string(),
+                    }
+                ));
+            }
+        }
     }
 
     // --- junction_annotation ---

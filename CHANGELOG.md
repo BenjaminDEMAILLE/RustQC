@@ -14,6 +14,11 @@
   `genome_results.txt`, the raw data tables and an HTML summary. Validated
   against mosdepth 0.3.14, samtools 1.24, Picard 3.4.0 and Qualimap 2.3.
 
+- New bigWig coverage tracks for `rustqc rna`, computed in the existing single
+  pass and replacing the `bedtools genomecov` into `bedGraphToBigWig`
+  round-trip (#112). Off by default; enable with `coverage_tracks.enabled` and
+  optionally `stranded`. Behind the `bigwig` cargo feature.
+
 ### Changed
 
 - Internal: assay-agnostic analyses (BAM flag helpers, read-level statistics,

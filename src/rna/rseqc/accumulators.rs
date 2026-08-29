@@ -58,6 +58,9 @@ pub struct RseqcAnnotations<'a> {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct RseqcConfig {
+    /// Strands to build coverage track accumulators for. Empty disables them;
+    /// a single `None` entry counts every read into one combined track.
+    pub coverage_strands: Vec<Option<char>>,
     /// MAPQ cutoff for read quality filtering.
     pub mapq_cut: u8,
     /// Maximum reads to sample for infer_experiment.
@@ -928,6 +931,8 @@ pub struct RseqcAccumulators {
     pub tin: Option<TinAccum>,
     /// preseq library complexity accumulator (`None` when disabled).
     pub preseq: Option<PreseqAccum>,
+    /// Coverage tracks, kept per contig so workers merge safely.
+    pub coverage: crate::common::coverage::bedgraph::CoverageTracks,
 }
 
 impl RseqcAccumulators {
@@ -943,6 +948,7 @@ impl RseqcAccumulators {
             inner_dist: None,
             tin: None,
             preseq: None,
+            coverage: crate::common::coverage::bedgraph::CoverageTracks::default(),
         }
     }
 
@@ -1001,6 +1007,9 @@ impl RseqcAccumulators {
             } else {
                 None
             },
+            coverage: crate::common::coverage::bedgraph::CoverageTracks::new(
+                config.coverage_strands.clone(),
+            ),
         }
     }
 
@@ -1031,6 +1040,9 @@ impl RseqcAccumulators {
         if let (Some(ref mut accum), Some(model)) = (&mut self.infer_exp, annotations.gene_model) {
             accum.process_read(record, chrom, model, config.mapq_cut);
         }
+
+        // Coverage tracks: no filtering at all, matching bedtools genomecov.
+        self.coverage.process_read(record, chrom);
 
         // read_distribution: needs region sets, uses uppercased chrom
         if let (Some(ref mut accum), Some(regions)) = (&mut self.read_dist, annotations.rd_regions)
@@ -1116,6 +1128,7 @@ impl RseqcAccumulators {
         if let (Some(ref mut a), Some(b)) = (&mut self.tin, other.tin) {
             a.merge(b);
         }
+        self.coverage.merge(other.coverage);
         if let (Some(ref mut a), Some(b)) = (&mut self.preseq, other.preseq) {
             a.merge(b);
         }

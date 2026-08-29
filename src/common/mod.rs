@@ -8,6 +8,7 @@
 pub mod bam_flags;
 pub mod bam_stat;
 pub mod bam_stat_accum;
+pub mod coverage;
 pub mod cpp_rng;
 pub mod preseq;
 pub mod samtools;
